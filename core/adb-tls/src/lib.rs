@@ -52,11 +52,7 @@ pub struct PairResult {
 
 /// Pair with a device at `addr` using the 6-digit wireless-debugging `code`.
 /// `adb_key_pem` is our persistent PKCS#8 identity (generate once, reuse).
-pub fn pair(
-    addr: SocketAddr,
-    code: &str,
-    adb_key_pem: &str,
-) -> Result<PairResult, PairError> {
+pub fn pair(addr: SocketAddr, code: &str, adb_key_pem: &str) -> Result<PairResult, PairError> {
     let (certs, key_der) = key::self_signed_cert(adb_key_pem)?;
     let pubkey = key::pubkey_line(adb_key_pem)?;
 
@@ -113,7 +109,5 @@ pub fn pair(
         .collect();
     debug!("paired, device guid {:?}", String::from_utf8_lossy(&guid));
 
-    Ok(PairResult {
-        device_guid: guid,
-    })
+    Ok(PairResult { device_guid: guid })
 }

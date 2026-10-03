@@ -22,9 +22,7 @@ fn jstr(env: &mut JNIEnv, s: String) -> jstring {
 }
 
 fn get_string(env: &mut JNIEnv, s: &JString) -> String {
-    env.get_string(s)
-        .map(|v| v.into())
-        .unwrap_or_default()
+    env.get_string(s).map(|v| v.into()).unwrap_or_default()
 }
 
 fn ok(v: Value) -> String {
@@ -36,8 +34,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 fn guarded<F: FnOnce() -> String>(f: F) -> String {
-    catch_unwind(AssertUnwindSafe(f))
-        .unwrap_or_else(|_| err("native panic"))
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| err("native panic"))
 }
 
 // ------------------------------------------------------------------ keys
@@ -119,9 +116,7 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeSpawnDaemon(
     let token = get_string(&mut env, &token);
     let out = guarded(|| {
         use base64::Engine;
-        let bytes = match base64::engine::general_purpose::STANDARD
-            .decode(&daemon_b64)
-        {
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(&daemon_b64) {
             Ok(b) => b,
             Err(e) => return err(format!("b64: {e}")),
         };
@@ -129,14 +124,7 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeSpawnDaemon(
             Ok(a) => a,
             Err(e) => return err(format!("bad addr: {e}")),
         };
-        match adb_ops::spawn_daemon(
-            &pem,
-            addr,
-            &bytes,
-            &remote_path,
-            &socket,
-            &token,
-        ) {
+        match adb_ops::spawn_daemon(&pem, addr, &bytes, &remote_path, &socket, &token) {
             Ok(out) => ok(json!({"output": out})),
             Err(e) => err(e),
         }
@@ -235,26 +223,26 @@ struct JniExecutor {
 
 impl agent::ToolExecutor for JniExecutor {
     fn execute(&self, name: &str, args_json: &str) -> String {
-        self.call("(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", "executeTool",
-                  &[name, args_json])
-            .unwrap_or_else(|e| {
-                json!({"ok": false, "error": format!("executor: {e}")}).to_string()
-            })
+        self.call(
+            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            "executeTool",
+            &[name, args_json],
+        )
+        .unwrap_or_else(|e| json!({"ok": false, "error": format!("executor: {e}")}).to_string())
     }
 
     fn ask(&self, question: &str) -> String {
-        self.call("(Ljava/lang/String;)Ljava/lang/String;", "askUser", &[question])
-            .unwrap_or_else(|e| format!("(ask failed: {e})"))
+        self.call(
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            "askUser",
+            &[question],
+        )
+        .unwrap_or_else(|e| format!("(ask failed: {e})"))
     }
 }
 
 impl JniExecutor {
-    fn call(
-        &self,
-        sig: &str,
-        method: &str,
-        args: &[&str],
-    ) -> Result<String, String> {
+    fn call(&self, sig: &str, method: &str, args: &[&str]) -> Result<String, String> {
         let mut env = self
             .jvm
             .attach_current_thread()
@@ -372,8 +360,7 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
 
     let jvm_ptr = jvm.get_java_vm_pointer() as usize;
     std::thread::spawn(move || {
-        let raw_vm =
-            || unsafe { JavaVM::from_raw(jvm_ptr as *mut jni::sys::JavaVM).unwrap() };
+        let raw_vm = || unsafe { JavaVM::from_raw(jvm_ptr as *mut jni::sys::JavaVM).unwrap() };
         let err_sink = JniSink {
             jvm: raw_vm(),
             callbacks: callbacks.clone(),

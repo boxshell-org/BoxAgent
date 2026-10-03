@@ -112,29 +112,23 @@ async fn dispatch(
             cmd,
             timeout_ms,
         } => exec::run(id, &cmd, timeout_ms, wr).await?,
-        Request::FileRead { id, path } => {
-            match fsops::read(&path) {
-                Ok(data) => {
-                    write_frame(
-                        wr,
-                        &Response::FileData {
-                            id,
-                            data_b64: base64::Engine::encode(
-                                &base64::engine::general_purpose::STANDARD,
-                                data,
-                            ),
-                        },
-                    )
-                    .await?
-                }
-                Err(e) => send_err(wr, id, e).await?,
+        Request::FileRead { id, path } => match fsops::read(&path) {
+            Ok(data) => {
+                write_frame(
+                    wr,
+                    &Response::FileData {
+                        id,
+                        data_b64: base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            data,
+                        ),
+                    },
+                )
+                .await?
             }
-        }
-        Request::FileWrite {
-            id,
-            path,
-            data_b64,
-        } => {
+            Err(e) => send_err(wr, id, e).await?,
+        },
+        Request::FileWrite { id, path, data_b64 } => {
             use base64::Engine;
             match base64::engine::general_purpose::STANDARD
                 .decode(&data_b64)
@@ -146,9 +140,7 @@ async fn dispatch(
             }
         }
         Request::FileList { id, path } => match fsops::list(&path) {
-            Ok(entries) => {
-                write_frame(wr, &Response::FileList { id, entries }).await?
-            }
+            Ok(entries) => write_frame(wr, &Response::FileList { id, entries }).await?,
             Err(e) => send_err(wr, id, e).await?,
         },
         Request::Screencap { id } => {
@@ -161,11 +153,7 @@ async fn dispatch(
     Ok(())
 }
 
-async fn send_err(
-    wr: &mut WriteHalf<UnixStream>,
-    id: u64,
-    e: anyhow::Error,
-) -> Result<()> {
+async fn send_err(wr: &mut WriteHalf<UnixStream>, id: u64, e: anyhow::Error) -> Result<()> {
     Ok(write_frame(
         wr,
         &Response::Err {

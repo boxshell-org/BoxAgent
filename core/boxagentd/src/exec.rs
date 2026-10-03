@@ -140,11 +140,7 @@ pub async fn run(
 /// `screencap -p` under shell uid captures the primary display.
 pub async fn screencap(id: u64, wr: &mut WriteHalf<UnixStream>) -> Result<()> {
     use base64::Engine;
-    let out = tokio::time::timeout(
-        SCREENCAP_TIMEOUT,
-        sh("screencap -p").output(),
-    )
-    .await;
+    let out = tokio::time::timeout(SCREENCAP_TIMEOUT, sh("screencap -p").output()).await;
 
     match out {
         Ok(Ok(o)) if o.status.success() && !o.stdout.is_empty() => {
@@ -152,8 +148,7 @@ pub async fn screencap(id: u64, wr: &mut WriteHalf<UnixStream>) -> Result<()> {
                 wr,
                 &Response::FileData {
                     id,
-                    data_b64: base64::engine::general_purpose::STANDARD
-                        .encode(o.stdout),
+                    data_b64: base64::engine::general_purpose::STANDARD.encode(o.stdout),
                 },
             )
             .await?;

@@ -39,8 +39,12 @@ class DaemonClient private constructor(
     suspend fun ping(): Boolean = withContext(Dispatchers.IO) {
         io.withLock {
             try {
+                // Half-dead daemons accept writes but never reply — bound the read.
+                socket.soTimeout = 10_000
                 send(JSONObject().put("type", "ping"))
-                recv().optString("type") == "pong"
+                val alive = recv().optString("type") == "pong"
+                socket.soTimeout = 0
+                alive
             } catch (e: Exception) {
                 false
             }

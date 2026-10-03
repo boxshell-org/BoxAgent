@@ -3,12 +3,9 @@
 
 use rustls::{
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme,
-    StreamOwned,
+    ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned,
 };
-use rustls_pki_types::{
-    CertificateDer, PrivateKeyDer, ServerName, UnixTime,
-};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use std::io::Write;
 use std::net::{IpAddr, Shutdown, TcpStream};
 use std::sync::Arc;

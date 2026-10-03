@@ -55,7 +55,11 @@ class AgentService : Service() {
             val i = Intent(context, AgentService::class.java)
                 .putExtra(EXTRA_TEXT, text)
                 .putExtra(EXTRA_WAKE, wake)
-            context.startForegroundService(i)
+            // From the background, startForegroundService can throw
+            // (ForegroundServiceStartNotAllowedException) — degrade to a
+            // normal start rather than crash the app.
+            runCatching { context.startForegroundService(i) }
+                .onFailure { runCatching { context.startService(i) } }
         }
 
         fun stop(context: Context) {

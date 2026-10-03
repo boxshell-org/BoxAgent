@@ -103,15 +103,9 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
                 return Err(AgentError::StepLimit);
             }
 
-            let assistant = llm::chat_stream(
-                &self.cfg.llm,
-                &messages,
-                &tools,
-                |delta| {
-                    self.sink
-                        .emit(json!({"type": "text_delta", "text": delta}));
-                },
-            )
+            let assistant = llm::chat_stream(&self.cfg.llm, &messages, &tools, |delta| {
+                self.sink.emit(json!({"type": "text_delta", "text": delta}));
+            })
             .await?;
 
             if assistant.tool_calls.is_empty() {

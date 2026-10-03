@@ -14,35 +14,71 @@ pub const MAX_FRAME: u32 = 16 * 1024 * 1024;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     /// First frame after connect. `token` must match the daemon spawn arg.
-    Auth { token: String },
+    Auth {
+        token: String,
+    },
     Ping,
     /// Execute `cmd` via `sh -c`. Response is a stream of `Chunk` frames
     /// followed by a single `ExecDone`.
-    Exec { id: u64, cmd: String, timeout_ms: u64 },
-    FileRead { id: u64, path: String },
-    FileWrite { id: u64, path: String, data_b64: String },
-    FileList { id: u64, path: String },
+    Exec {
+        id: u64,
+        cmd: String,
+        timeout_ms: u64,
+    },
+    FileRead {
+        id: u64,
+        path: String,
+    },
+    FileWrite {
+        id: u64,
+        path: String,
+        data_b64: String,
+    },
+    FileList {
+        id: u64,
+        path: String,
+    },
     /// `screencap -p` executed in the shell context; returns PNG bytes.
-    Screencap { id: u64 },
+    Screencap {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    AuthOk { uid: u32 },
+    AuthOk {
+        uid: u32,
+    },
     Pong,
     /// Streaming exec output. `stream`: "stdout" | "stderr".
-    Chunk { id: u64, stream: String, data_b64: String },
+    Chunk {
+        id: u64,
+        stream: String,
+        data_b64: String,
+    },
     ExecDone {
         id: u64,
         exit: i32,
         duration_ms: u64,
         timed_out: bool,
     },
-    FileData { id: u64, data_b64: String },
-    FileWritten { id: u64, bytes: u64 },
-    FileList { id: u64, entries: Vec<FileEntry> },
-    Err { id: Option<u64>, message: String },
+    FileData {
+        id: u64,
+        data_b64: String,
+    },
+    FileWritten {
+        id: u64,
+        bytes: u64,
+    },
+    FileList {
+        id: u64,
+        entries: Vec<FileEntry>,
+    },
+    Err {
+        id: Option<u64>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,9 +110,7 @@ where
 {
     let len = match r.read_u32().await {
         Ok(v) => v,
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            return Err(ProtoError::Closed)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Err(ProtoError::Closed),
         Err(e) => return Err(e.into()),
     };
     if len > MAX_FRAME {
@@ -114,7 +148,11 @@ mod tests {
         write_frame(&mut a, &req).await.unwrap();
         let got: Request = read_frame(&mut b).await.unwrap();
         match got {
-            Request::Exec { id, cmd, timeout_ms } => {
+            Request::Exec {
+                id,
+                cmd,
+                timeout_ms,
+            } => {
                 assert_eq!(id, 42);
                 assert_eq!(cmd, "id");
                 assert_eq!(timeout_ms, 1000);

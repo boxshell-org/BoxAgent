@@ -116,8 +116,8 @@ fn parse_delta<F: FnMut(&str)>(
     acc: &mut AssistantMsg,
     on_delta: &mut F,
 ) -> Result<(), LlmError> {
-    let v: Value = serde_json::from_str(data)
-        .map_err(|e| LlmError::Stream(format!("{e}: {data}")))?;
+    let v: Value =
+        serde_json::from_str(data).map_err(|e| LlmError::Stream(format!("{e}: {data}")))?;
     let Some(choice) = v["choices"].get(0) else {
         return Ok(());
     };
@@ -184,7 +184,10 @@ pub async fn ping(cfg: &LlmConfig) -> Result<String, LlmError> {
             body: resp.text().await.unwrap_or_default(),
         });
     }
-    let v: Value = resp.json().await.map_err(|e| LlmError::Stream(e.to_string()))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| LlmError::Stream(e.to_string()))?;
     Ok(v["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("")

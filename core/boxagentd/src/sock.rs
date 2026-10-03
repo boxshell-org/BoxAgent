@@ -30,8 +30,8 @@ pub fn bind_abstract(name: &str) -> Result<UnixListener> {
             addr.sun_path.as_mut_ptr().add(1),
             name_bytes.len(),
         );
-        let addr_len = (mem::size_of::<libc::sa_family_t>() + 1 + name_bytes.len())
-            as libc::socklen_t;
+        let addr_len =
+            (mem::size_of::<libc::sa_family_t>() + 1 + name_bytes.len()) as libc::socklen_t;
 
         if libc::bind(fd, &addr as *const _ as *const libc::sockaddr, addr_len) < 0 {
             let e = io::Error::last_os_error();
