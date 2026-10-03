@@ -166,12 +166,12 @@ async fn send_err(
     id: u64,
     e: anyhow::Error,
 ) -> Result<()> {
-    write_frame(
+    Ok(write_frame(
         wr,
         &Response::Err {
             id: Some(id),
             message: format!("{e:#}"),
         },
     )
-    .await
+    .await?)
 }

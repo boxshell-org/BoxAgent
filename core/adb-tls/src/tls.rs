@@ -9,7 +9,7 @@ use rustls::{
 use rustls_pki_types::{
     CertificateDer, PrivateKeyDer, ServerName, UnixTime,
 };
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{IpAddr, Shutdown, TcpStream};
 use std::sync::Arc;
 use thiserror::Error;
@@ -76,7 +76,7 @@ impl ServerCertVerifier for NoVerify {
 pub fn connect(
     sock: &TcpStream,
     certs: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer,
+    key: PrivateKeyDer<'static>,
 ) -> Result<StreamOwned<ClientConnection, TcpStream>, TlsError> {
     let config = ClientConfig::builder()
         .dangerous()
@@ -84,7 +84,7 @@ pub fn connect(
         .with_client_auth_cert(certs, key)
         .map_err(|e| TlsError::Rustls(format!("{e}")))?;
 
-    let name = ServerName::IpAddress(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let name = ServerName::IpAddress(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST).into());
     let conn = ClientConnection::new(Arc::new(config), name)
         .map_err(|e| TlsError::Rustls(format!("{e}")))?;
 
@@ -100,6 +100,7 @@ pub fn connect(
 }
 
 /// Convenience wrapper if callers need RAII close.
+#[allow(dead_code)]
 pub struct StreamOwnedGuard(pub StreamOwned<ClientConnection, TcpStream>);
 
 impl Drop for StreamOwnedGuard {

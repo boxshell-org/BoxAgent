@@ -4,15 +4,15 @@ use anyhow::Result;
 use base64::Engine;
 use boxagent_proto::{write_frame, Response};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 const CHUNK: usize = 32 * 1024;
 const SCREENCAP_TIMEOUT: Duration = Duration::from_secs(15);
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 fn sh(cmd: &str) -> Command {
     let mut c = Command::new("/system/bin/sh");
@@ -26,11 +26,13 @@ fn sh(cmd: &str) -> Command {
     c
 }
 
+/// Read `pipe` to EOF, forwarding each chunk over `tx`. Lives in its own
+/// task so stdout and stderr interleave; owns nothing but the sender.
 async fn stream_pipe<R: AsyncReadExt + Unpin>(
     id: u64,
     name: &'static str,
     mut pipe: R,
-    wr: Arc<Mutex<WriteHalf<UnixStream>>>,
+    tx: mpsc::Sender<Response>,
 ) {
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut buf = vec![0u8; CHUNK];
@@ -43,20 +45,11 @@ async fn stream_pipe<R: AsyncReadExt + Unpin>(
                     stream: name.into(),
                     data_b64: b64.encode(&buf[..n]),
                 };
-                if wr.lock().await.write_all_frame(&msg).await.is_err() {
+                if tx.send(msg).await.is_err() {
                     break;
                 }
             }
         }
-    }
-}
-
-trait FrameSink {
-    async fn write_all_frame(&mut self, v: &Response) -> Result<()>;
-}
-impl FrameSink for WriteHalf<UnixStream> {
-    async fn write_all_frame(&mut self, v: &Response) -> Result<()> {
-        Ok(write_frame(self, v).await?)
     }
 }
 
@@ -80,48 +73,67 @@ pub async fn run(
 ) -> Result<()> {
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.max(500));
-    let wr = Arc::new(Mutex::new(wr));
 
     let mut child = match sh(cmd).spawn() {
         Ok(c) => c,
         Err(e) => {
-            wr.lock()
-                .await
-                .write_all_frame(&Response::Err {
+            write_frame(
+                wr,
+                &Response::Err {
                     id: Some(id),
                     message: format!("spawn: {e}"),
-                })
-                .await?;
+                },
+            )
+            .await?;
             return Ok(());
         }
     };
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let (tx, mut rx) = mpsc::channel::<Response>(64);
     let mut handles = Vec::new();
-    if let Some(p) = stdout {
-        let w = wr.clone();
-        handles.push(tokio::spawn(stream_pipe(id, "stdout", p, w)));
+    if let Some(p) = child.stdout.take() {
+        handles.push(tokio::spawn(stream_pipe(id, "stdout", p, tx.clone())));
     }
-    if let Some(p) = stderr {
-        let w = wr.clone();
-        handles.push(tokio::spawn(stream_pipe(id, "stderr", p, w)));
+    if let Some(p) = child.stderr.take() {
+        handles.push(tokio::spawn(stream_pipe(id, "stderr", p, tx.clone())));
     }
+    drop(tx);
 
-    let (exit, timed_out) = wait_child(&mut child, timeout).await;
+    // Interleave streamed chunks with the wait so output flows live and a
+    // chatty command can't deadlock on a full channel.
+    let mut wait = Box::pin(wait_child(&mut child, timeout));
+    let mut rx_open = true;
+    let (exit, timed_out) = loop {
+        tokio::select! {
+            msg = rx.recv(), if rx_open => match msg {
+                Some(m) => write_frame(wr, &m).await?,
+                None => rx_open = false,
+            },
+            r = &mut wait => break r,
+        }
+    };
+
+    // Bounded drain: grandchildren may hold pipes open after the leader dies.
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        while let Some(m) = rx.recv().await {
+            let _ = write_frame(wr, &m).await;
+        }
+    })
+    .await;
     for h in handles {
-        let _ = h.await;
+        h.abort();
     }
 
-    wr.lock()
-        .await
-        .write_all_frame(&Response::ExecDone {
+    write_frame(
+        wr,
+        &Response::ExecDone {
             id,
             exit: exit.unwrap_or(-1),
             duration_ms: started.elapsed().as_millis() as u64,
             timed_out,
-        })
-        .await?;
+        },
+    )
+    .await?;
     Ok(())
 }
 

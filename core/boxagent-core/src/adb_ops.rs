@@ -2,7 +2,7 @@
 //! generic shell access. Backed by `adb_client`'s message transport
 //! (TLS-capable `TcpTransport`).
 
-use adb_client::{ADBDeviceExt, ADBTcpDevice};
+use adb_client::{tcp::ADBTcpDevice, ADBDeviceExt};
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;

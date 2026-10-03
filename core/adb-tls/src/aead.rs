@@ -45,7 +45,7 @@ impl PairingCipher {
         Aes128Gcm::new_from_slice(&self.key).expect("key len")
     }
 
-    fn nonce(seq: u64) -> Nonce {
+    fn nonce(seq: u64) -> Nonce<aes_gcm::aead::generic_array::typenum::U12> {
         let mut n = [0u8; 12];
         n[..8].copy_from_slice(&seq.to_le_bytes());
         *Nonce::from_slice(&n)

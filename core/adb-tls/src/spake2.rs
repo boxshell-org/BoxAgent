@@ -110,7 +110,7 @@ fn scalar_mul_raw(scalar_le: &[u8; 32], point: &EdwardsPoint) -> EdwardsPoint {
             if byte & (1 << bit) != 0 {
                 acc += p;
             }
-            p = p.double();
+            p = p + p;
         }
     }
     acc

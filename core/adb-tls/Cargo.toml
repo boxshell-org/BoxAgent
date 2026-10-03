@@ -15,5 +15,8 @@ rustls-pki-types = "1"
 rcgen = "0.14"
 rsa = "0.9"
 rand = "0.8"
+num-bigint = { package = "num-bigint-dig", version = "0.8" }
+num-traits = "0.2"
+base64 = "0.22"
 thiserror = { workspace = true }
 tracing = { workspace = true }

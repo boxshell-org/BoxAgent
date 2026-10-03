@@ -197,7 +197,7 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "clipboard_set", "Set clipboard",
-            "Set clipboard text.",
+            "Set the system clipboard text via `cmd clipboard` (or service call fallback).",
             obj(json!({"text": s("Text to place on clipboard")}), &["text"]),
             Moderate, "shell",
         ),
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(names.len(), dedup.len(), "duplicate tool names");
         for t in &tools {
             assert_eq!(t.parameters["type"], "object");
-            assert!(t.description.len() > 20);
+            assert!(t.description.len() > 20, "{}: {:?}", t.name, t.description);
         }
         let v = openai_tools();
         assert!(v.is_array());

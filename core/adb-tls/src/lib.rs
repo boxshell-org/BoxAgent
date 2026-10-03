@@ -33,6 +33,8 @@ pub enum PairError {
     Tls(#[from] tls::TlsError),
     #[error("packet: {0}")]
     Packet(#[from] packet::PacketError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
     #[error("peer rejected SPAKE2 message")]
     SpakeRejected,
     #[error("cipher: {0}")]

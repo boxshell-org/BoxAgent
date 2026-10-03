@@ -3,6 +3,7 @@
 //! String-returning functions never throw; errors are reported as
 //! `{"ok":false,"error":"..."}` JSON so Kotlin has one contract.
 
+use crate::agent::EventSink;
 use crate::{adb_ops, agent, llm, tools};
 use jni::objects::{GlobalRef, JObject, JString, JValue};
 use jni::sys::{jint, jlong, jstring};
@@ -369,17 +370,20 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
     let cancel = Arc::new(AtomicBool::new(false));
     agents().lock().unwrap().insert(id, cancel.clone());
 
+    let jvm_ptr = jvm.get_java_vm_pointer() as usize;
     std::thread::spawn(move || {
+        let raw_vm =
+            || unsafe { JavaVM::from_raw(jvm_ptr as *mut jni::sys::JavaVM).unwrap() };
         let err_sink = JniSink {
-            jvm: jvm.clone(),
+            jvm: raw_vm(),
             callbacks: callbacks.clone(),
         };
         let sink = JniSink {
-            jvm: jvm.clone(),
+            jvm: raw_vm(),
             callbacks: callbacks.clone(),
         };
         let exec = JniExecutor {
-            jvm,
+            jvm: raw_vm(),
             callbacks,
         };
         let a = agent::Agent::new(cfg, exec, sink, cancel.clone());

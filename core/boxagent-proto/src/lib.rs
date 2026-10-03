@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MAX_FRAME: u32 = 16 * 1024 * 1024;
 
@@ -69,7 +69,7 @@ pub enum ProtoError {
 /// Read one length-prefixed JSON frame.
 pub async fn read_frame<R, T>(r: &mut R) -> Result<T, ProtoError>
 where
-    R: AsyncReadExt + Unpin,
+    R: AsyncRead + Unpin,
     T: for<'de> Deserialize<'de>,
 {
     let len = match r.read_u32().await {
@@ -88,7 +88,10 @@ where
 }
 
 /// Write one length-prefixed JSON frame.
-pub async fn write_frame<W, T: Serialize>(w: &mut W, v: &T) -> Result<(), ProtoError> {
+pub async fn write_frame<W, T: Serialize>(w: &mut W, v: &T) -> Result<(), ProtoError>
+where
+    W: AsyncWrite + Unpin,
+{
     let payload = serde_json::to_vec(v)?;
     w.write_u32(payload.len() as u32).await?;
     w.write_all(&payload).await?;
