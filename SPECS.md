@@ -302,15 +302,15 @@ Not allowed: UI kit libraries, analytics, ad SDKs, monolithic frameworks duplica
 
 ## 10. Milestones
 
-| # | Deliverable | Exit criteria |
-|---|---|---|
-| M1 | Scaffold | Gradle+cargo-ndk build, JNI round-trip, Compose theme applied |
-| M2 | Privilege | ADB pair → daemon spawn → `shell_exec` returns uid=shell from app UI |
-| M3 | UI toolkit | a11y service live; `ui_tree`/`tap`/`type_text`/`screenshot` working via Tools playground |
-| M4 | Keep-alive | FGS + watchdog + boot restore + battery exemption flow |
-| M5 | Agent | LLM chat → multi-tool task completion with confirms, streaming, cancel |
-| M6 | Polish | Onboarding, Logs, Settings complete; Apple B/W theme pass; audit export |
-| M7 | QA | Integration suite green on API 30/34/35; soak report |
+| # | Deliverable | Exit criteria | Status |
+|---|---|---|---|
+| M1 | Scaffold | Gradle+cargo-ndk build, JNI round-trip, Compose theme applied | Done — `cargo test` + `assembleDebug` green; 9 JNI fns wired |
+| M2 | Privilege | ADB pair → daemon spawn → `shell_exec` returns uid=shell from app UI | Implemented; device verification pending (no emulator in CI env) |
+| M3 | UI toolkit | a11y service live; `ui_tree`/`tap`/`type_text`/`screenshot` working via Tools playground | Implemented; runnable from Tools screen |
+| M4 | Keep-alive | FGS + watchdog + boot restore + battery exemption flow | Implemented; device verification pending |
+| M5 | Agent | LLM chat → multi-tool task completion with confirms, streaming, cancel | Implemented; SPAKE2/AEAD unit-verified, needs real-device pairing test |
+| M6 | Polish | Onboarding, Logs, Settings complete; Apple B/W theme pass; audit export | Done |
+| M7 | QA | Integration suite green on API 30/34/35; soak report | Partial — host tests green; on-device matrix requires hardware |
 
 ---
 
