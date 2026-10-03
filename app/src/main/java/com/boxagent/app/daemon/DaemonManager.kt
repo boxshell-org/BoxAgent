@@ -64,16 +64,16 @@ class DaemonManager(
      * debugging pairing dialog (or NSD-supplied endpoint). */
     suspend fun pair(host: String, port: Int, code: String): Result<String> =
         withContext(Dispatchers.IO) {
-            _status.value = DaemonStatus(ShellState.PAIRING, detail = "pairing…")
+            _status.value = DaemonStatus(ShellState.PAIRING, detail = "key:pairing")
             runCatching {
                 val pem = ensureKey()
                 val resp = JSONObject(Core.nativePair(host, port, code, pem))
                 if (!resp.optBoolean("ok")) error(resp.optString("error"))
                 resp.getJSONObject("data").optString("guid")
             }.onSuccess {
-                _status.value = DaemonStatus(ShellState.OFFLINE, detail = "paired; connect pending")
+                _status.value = DaemonStatus(ShellState.OFFLINE, detail = "key:paired_pending")
             }.onFailure {
-                _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "pair failed")
+                _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "key:pair_failed")
             }
         }
 
@@ -84,7 +84,7 @@ class DaemonManager(
     suspend fun connectAndSpawn(host: String, port: Int): Result<DaemonClient> =
         withContext(Dispatchers.IO) {
             lock.withLock {
-                _status.value = DaemonStatus(ShellState.CONNECTING, detail = "connecting adb…")
+                _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:connecting_adb")
                 runCatching {
                     val pem = ensureKey()
                     val daemonBytes = daemonBinary()
@@ -122,13 +122,13 @@ class DaemonManager(
                     _status.value = DaemonStatus(
                         ShellState.ONLINE,
                         uid = 2000,
-                        detail = "daemon up",
+                        detail = "key:daemon_up",
                         socket = socket,
                     )
                     startWatchdog()
                     cli
                 }.onFailure {
-                    _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "spawn failed")
+                    _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "key:spawn_failed")
                 }
             }
         }
@@ -144,7 +144,7 @@ class DaemonManager(
             return@withLock null
         }
         client = cli
-        _status.value = DaemonStatus(ShellState.ONLINE, uid = 2000, detail = "reconnected", socket = socket)
+        _status.value = DaemonStatus(ShellState.ONLINE, uid = 2000, detail = "key:reconnected", socket = socket)
         startWatchdog()
         cli
     }
@@ -169,7 +169,7 @@ class DaemonManager(
                 if (!settings.keepWatchdog.first()) continue
                 val c = client ?: continue
                 if (!c.ping()) {
-                    _status.value = DaemonStatus(ShellState.CONNECTING, detail = "daemon lost; respawning…")
+                    _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:daemon_lost")
                     c.close()
                     client = null
                     reconnect() ?: run {

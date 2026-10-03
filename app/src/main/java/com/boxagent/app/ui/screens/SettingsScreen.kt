@@ -21,8 +21,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import android.app.Activity
+import android.os.Build
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.bridge.Core
 import com.boxagent.app.data.ConfirmPolicy
 import com.boxagent.app.data.Settings
@@ -32,6 +37,7 @@ import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.SectionLabel
 import com.boxagent.app.ui.components.MonoText
 import com.boxagent.app.ui.theme.BwShape
+import com.boxagent.app.util.LocaleHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -96,18 +102,18 @@ fun SettingsScreen(app: BoxAgentApp) {
                         })
                     }
                 }
-                SettingField("API key", apiKey, { apiKey = it }, secret = true)
-                SettingField("Base URL", url, { url = it })
-                SettingField("Model", mdl, { mdl = it })
+                SettingField(stringResource(R.string.api_key), apiKey, { apiKey = it }, secret = true)
+                SettingField(stringResource(R.string.base_url), url, { url = it })
+                SettingField(stringResource(R.string.model), mdl, { mdl = it })
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    SettingField("Temperature", tempStr, { tempStr = it },
+                    SettingField(stringResource(R.string.temperature), tempStr, { tempStr = it },
                         Modifier.weight(1f))
-                    SettingField("Max tokens", tokStr, { tokStr = it },
+                    SettingField(stringResource(R.string.max_tokens), tokStr, { tokStr = it },
                         Modifier.weight(1f))
                 }
-                SettingField("System prompt", sysPrompt, { sysPrompt = it }, lines = 4)
+                SettingField(stringResource(R.string.system_prompt), sysPrompt, { sysPrompt = it }, lines = 4)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PillButton("Save", onClick = {
+                    PillButton(stringResource(R.string.save), onClick = {
                         app.secrets.apiKey = apiKey
                         scope.launch {
                             s.setLlm(url, mdl,
@@ -116,7 +122,7 @@ fun SettingsScreen(app: BoxAgentApp) {
                             s.setSystemPrompt(sysPrompt.ifEmpty { Settings.DEFAULT_SYSTEM_PROMPT })
                         }
                     })
-                    PillButton("Test", filled = false, onClick = {
+                    PillButton(stringResource(R.string.test), filled = false, onClick = {
                         testResult = "…"
                         scope.launch {
                             testResult = withContext(Dispatchers.IO) {
@@ -137,64 +143,91 @@ fun SettingsScreen(app: BoxAgentApp) {
             }
         }
 
-        SectionLabel("Safety")
+        SectionLabel(stringResource(R.string.safety))
         BwCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Confirmation policy",
+                    stringResource(R.string.confirm_policy),
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ConfirmPolicy.entries.forEach { p ->
                         PillButton(
-                            p.name.lowercase().replaceFirstChar { it.uppercase() },
+                            policyName(p),
                             filled = policy == p,
                             onClick = { scope.launch { s.setConfirmPolicy(p) } },
                         )
                     }
                 }
                 Text(
-                    when (policy) {
-                        ConfirmPolicy.STRICT -> "Every non-readonly tool asks first."
-                        ConfirmPolicy.BALANCED -> "Only destructive tools ask first."
-                        ConfirmPolicy.AUTONOMOUS -> "Nothing asks. The agent has full run."
-                    },
+                    stringResource(
+                        when (policy) {
+                            ConfirmPolicy.STRICT -> R.string.policy_strict_desc
+                            ConfirmPolicy.BALANCED -> R.string.policy_balanced_desc
+                            ConfirmPolicy.AUTONOMOUS -> R.string.policy_autonomous_desc
+                        },
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                SettingField("Step cap", stepsStr, { stepsStr = it })
-                PillButton("Save limits", filled = false, onClick = {
+                SettingField(stringResource(R.string.step_cap), stepsStr, { stepsStr = it })
+                PillButton(stringResource(R.string.save_limits), filled = false, onClick = {
                     scope.launch { s.setMaxSteps(stepsStr.toIntOrNull() ?: 40) }
                 })
             }
         }
 
-        SectionLabel("Runtime")
+        SectionLabel(stringResource(R.string.runtime))
         BwCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                ToggleRow("Daemon watchdog", keepWatchdog) {
+                ToggleRow(stringResource(R.string.daemon_watchdog), keepWatchdog) {
                     scope.launch { s.setKeepWatchdog(it) }
                 }
                 Text(
-                    "Restarts the shell daemon if the connection drops; runs a " +
-                    "15-minute health check while the app is backgrounded.",
+                    stringResource(R.string.watchdog_desc),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
 
-        SectionLabel("Appearance")
+        SectionLabel(stringResource(R.string.appearance))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf("system", "light", "dark").forEach { t ->
-                PillButton(t.replaceFirstChar { it.uppercase() }, filled = theme == t, onClick = {
+            listOf(
+                "system" to R.string.theme_system,
+                "light" to R.string.theme_light,
+                "dark" to R.string.theme_dark,
+            ).forEach { (t, label) ->
+                PillButton(stringResource(label), filled = theme == t, onClick = {
                     scope.launch { s.setTheme(t) }
                 })
             }
         }
 
-        SectionLabel("Onboarding")
-        PillButton("Redo setup", filled = false, onClick = {
+        SectionLabel(stringResource(R.string.language))
+        run {
+            val ctx = LocalContext.current
+            val lang by LocaleHelper.language.collectAsState()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                LocaleHelper.SUPPORTED.forEach { tag ->
+                    PillButton(
+                        when (tag) {
+                            "en" -> "English"
+                            "zh" -> "中文"
+                            else -> stringResource(R.string.theme_system)
+                        },
+                        filled = lang == tag,
+                        onClick = {
+                            LocaleHelper.setLanguage(ctx, tag)
+                            if (Build.VERSION.SDK_INT < 33) (ctx as? Activity)?.recreate()
+                        },
+                    )
+                }
+            }
+        }
+
+        SectionLabel(stringResource(R.string.onboarding))
+        PillButton(stringResource(R.string.redo_setup), filled = false, onClick = {
             scope.launch { s.setOnboarded(false) }
         })
     }
@@ -239,7 +272,7 @@ private fun ToggleRow(label: String, on: Boolean, onToggle: (Boolean) -> Unit) {
             modifier = Modifier.padding(2.dp),
         ) {
             Text(
-                if (on) "On" else "Off",
+                stringResource(if (on) R.string.toggle_on else R.string.toggle_off),
                 style = MaterialTheme.typography.labelMedium,
                 color = if (on) MaterialTheme.colorScheme.onPrimary
                         else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -248,3 +281,12 @@ private fun ToggleRow(label: String, on: Boolean, onToggle: (Boolean) -> Unit) {
         }
     }
 }
+
+@Composable
+private fun policyName(p: ConfirmPolicy): String = stringResource(
+    when (p) {
+        ConfirmPolicy.STRICT -> R.string.policy_strict
+        ConfirmPolicy.BALANCED -> R.string.policy_balanced
+        ConfirmPolicy.AUTONOMOUS -> R.string.policy_autonomous
+    },
+)

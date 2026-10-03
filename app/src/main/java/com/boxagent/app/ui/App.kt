@@ -21,8 +21,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.ui.components.StatusDot
 import com.boxagent.app.ui.screens.ChatScreen
@@ -33,8 +35,12 @@ import com.boxagent.app.ui.screens.StatusScreen
 import com.boxagent.app.ui.screens.ToolsScreen
 import com.boxagent.app.ui.theme.BoxAgentTheme
 
-private enum class Tab(val label: String) {
-    CHAT("Agent"), TOOLS("Tools"), STATUS("Status"), LOGS("Logs"), SETTINGS("Settings"),
+private enum class Tab(val labelRes: Int) {
+    CHAT(R.string.tab_agent),
+    TOOLS(R.string.tab_tools),
+    STATUS(R.string.tab_status),
+    LOGS(R.string.tab_logs),
+    SETTINGS(R.string.tab_settings),
 }
 
 @Composable
@@ -73,13 +79,14 @@ private fun MainShell(app: BoxAgentApp) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                if (tab == Tab.CHAT) "BoxAgent" else tab.label,
+                if (tab == Tab.CHAT) stringResource(R.string.app_name)
+                else stringResource(tab.labelRes),
                 style = MaterialTheme.typography.headlineSmall,
                 modifier = Modifier.weight(1f),
             )
             if (agentState.running) {
                 Text(
-                    "step ${agentState.steps}",
+                    stringResource(R.string.step_count, agentState.steps),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -113,7 +120,7 @@ private fun MainShell(app: BoxAgentApp) {
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            t.label,
+                            stringResource(t.labelRes),
                             style = MaterialTheme.typography.labelMedium,
                             color = if (t == tab) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.onSurfaceVariant,

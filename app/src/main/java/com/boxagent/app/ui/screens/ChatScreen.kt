@@ -34,9 +34,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.agent.ChatMsg
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
@@ -68,21 +70,22 @@ fun ChatScreen(app: BoxAgentApp) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "New",
+                stringResource(R.string.chat_new),
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier
                     .clickable(enabled = !state.running) { app.agent.newConversation() }
                     .padding(4.dp),
             )
             Text(
-                "History",
+                stringResource(R.string.chat_history),
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier
                     .clickable { showHistory = true }
                     .padding(4.dp),
             )
             Text(
-                "Conv ${if (state.conversationId > 0) "#${state.conversationId}" else "—"}",
+                stringResource(R.string.chat_conv,
+                    if (state.conversationId > 0) "#${state.conversationId}" else "—"),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(4.dp),
@@ -123,7 +126,7 @@ fun ChatScreen(app: BoxAgentApp) {
                             color = MaterialTheme.colorScheme.primary,
                         )
                         Text(
-                            "working…",
+                            stringResource(R.string.chat_working),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -162,7 +165,7 @@ fun ChatScreen(app: BoxAgentApp) {
         state.pendingAsk?.let { ask ->
             BwCard(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
                 Column {
-                    Text("Assistant asks", style = MaterialTheme.typography.labelLarge)
+                    Text(stringResource(R.string.chat_assistant_asks), style = MaterialTheme.typography.labelLarge)
                     Text(ask.question, style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(vertical = 8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -170,9 +173,9 @@ fun ChatScreen(app: BoxAgentApp) {
                             value = answer,
                             onChange = { answer = it },
                             modifier = Modifier.weight(1f),
-                            placeholder = "answer…",
+                            placeholder = stringResource(R.string.chat_answer_hint),
                         )
-                        PillButton("Send", onClick = {
+                        PillButton(stringResource(R.string.send), onClick = {
                             app.agent.answerAsk(answer)
                             answer = ""
                         }, modifier = Modifier.padding(start = 8.dp))
@@ -193,14 +196,14 @@ fun ChatScreen(app: BoxAgentApp) {
                 value = input,
                 onChange = { input = it },
                 modifier = Modifier.weight(1f),
-                placeholder = "Ask BoxAgent to do something…",
+                placeholder = stringResource(R.string.chat_input_hint),
                 enabled = !state.running,
             )
             if (state.running) {
-                PillButton("Stop", onClick = { app.agent.cancel() },
+                PillButton(stringResource(R.string.stop), onClick = { app.agent.cancel() },
                     filled = false, modifier = Modifier.padding(start = 8.dp))
             } else {
-                PillButton("Send", onClick = {
+                PillButton(stringResource(R.string.send), onClick = {
                     app.agent.send(input)
                     input = ""
                 }, enabled = input.isNotBlank(), modifier = Modifier.padding(start = 8.dp))
@@ -263,7 +266,7 @@ private fun EmptyState(app: BoxAgentApp, shellOnline: Boolean, onPrompt: (String
             style = MaterialTheme.typography.displayMedium,
         )
         Text(
-            "An operator for this phone.",
+            stringResource(R.string.tagline),
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 8.dp),
@@ -272,18 +275,18 @@ private fun EmptyState(app: BoxAgentApp, shellOnline: Boolean, onPrompt: (String
             Modifier.padding(top = 24.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            StatusPill("shell", shellOnline)
-            StatusPill("a11y", A11yService.isEnabled)
+            StatusPill(stringResource(R.string.cap_shell), shellOnline)
+            StatusPill(stringResource(R.string.cap_a11y), A11yService.isEnabled)
         }
         Column(
             Modifier.padding(top = 40.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             listOf(
-                "Open Settings and disable animations",
-                "What's my battery level?",
-                "Take a screenshot",
-                "List my installed apps",
+                stringResource(R.string.suggest_1),
+                stringResource(R.string.suggest_2),
+                stringResource(R.string.suggest_3),
+                stringResource(R.string.suggest_4),
             ).forEach { s ->
                 Surface(
                     shape = BwShape.Pill,
@@ -360,7 +363,8 @@ private fun ToolCallsColumn(msg: ChatMsg) {
                             style = MaterialTheme.typography.labelLarge,
                         )
                         Text(
-                            if (call.result != null) " · ${call.durationMs}ms" else " · running",
+                            if (call.result != null) " · ${call.durationMs}ms"
+                            else " · " + stringResource(R.string.tool_running),
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(start = 6.dp),
@@ -388,7 +392,7 @@ private fun ConfirmCard(
     BwCard(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Approve action", style = MaterialTheme.typography.titleMedium)
+                Text(stringResource(R.string.approve_action), style = MaterialTheme.typography.titleMedium)
                 Surface(
                     shape = BwShape.Pill,
                     border = androidx.compose.foundation.BorderStroke(
@@ -418,9 +422,9 @@ private fun ConfirmCard(
                     .padding(top = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                PillButton("Deny", filled = false, onClick = { onResolve(false, false) })
-                PillButton("Allow", onClick = { onResolve(true, false) })
-                PillButton("Always", filled = false, onClick = { onResolve(true, true) })
+                PillButton(stringResource(R.string.deny), filled = false, onClick = { onResolve(false, false) })
+                PillButton(stringResource(R.string.allow), onClick = { onResolve(true, false) })
+                PillButton(stringResource(R.string.always), filled = false, onClick = { onResolve(true, true) })
             }
         }
     }
@@ -435,7 +439,7 @@ private fun HistoryDialog(app: BoxAgentApp, onPick: (Long) -> Unit, onDismiss: (
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {},
-        title = { Text("Conversations", style = MaterialTheme.typography.titleMedium) },
+        title = { Text(stringResource(R.string.conversations), style = MaterialTheme.typography.titleMedium) },
         text = {
             LazyColumn {
                 items(convs.value, key = { it.id }) { c ->

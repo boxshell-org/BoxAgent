@@ -1,6 +1,7 @@
 package com.boxagent.app.agent
 
 import android.content.Context
+import com.boxagent.app.R
 import com.boxagent.app.bridge.AgentCallbacks
 import com.boxagent.app.bridge.Core
 import com.boxagent.app.data.Secrets
@@ -94,7 +95,9 @@ class AgentController(
         if (_state.value.running || prompt.isBlank()) return
         val secretsApiKey = secrets.apiKey
         if (secretsApiKey.isEmpty()) {
-            _state.update { it.copy(error = "Set your LLM API key in Settings first") }
+            _state.update {
+                it.copy(error = context.getString(R.string.error_no_api_key))
+            }
             return
         }
         scope.launch { startRun(prompt, secretsApiKey) }
@@ -133,11 +136,16 @@ class AgentController(
                 currentAssistantText = "",
             )
         }
-        com.boxagent.app.service.AgentService.start(context, "running task")
+        com.boxagent.app.service.AgentService.start(
+            context,
+            context.getString(R.string.notif_running_task),
+        )
 
         agentHandle = Core.nativeStartAgent(config.toString(), callbacks)
         if (agentHandle < 0) {
-            _state.update { it.copy(running = false, error = "failed to start agent") }
+            _state.update {
+                it.copy(running = false, error = context.getString(R.string.error_agent_start))
+            }
         }
     }
 

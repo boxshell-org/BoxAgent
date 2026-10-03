@@ -26,8 +26,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.agent.ToolCatalog
 import com.boxagent.app.agent.ToolSpec
 import com.boxagent.app.ui.Hairline
@@ -55,7 +57,7 @@ fun ToolsScreen(app: BoxAgentApp) {
                 value = query,
                 onValueChange = { query = it },
                 placeholder = {
-                    Text("Search tools", style = MaterialTheme.typography.bodyMedium,
+                    Text(stringResource(R.string.search_tools), style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 },
                 textStyle = MaterialTheme.typography.bodyMedium,
@@ -120,7 +122,7 @@ private fun RiskBadge(risk: String) {
                 else MaterialTheme.colorScheme.surface,
     ) {
         Text(
-            risk,
+            riskLabel(risk),
             style = MaterialTheme.typography.labelSmall,
             color = if (risk == "destructive") MaterialTheme.colorScheme.onPrimary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -155,21 +157,21 @@ private fun ToolDialog(app: BoxAgentApp, tool: ToolSpec, onDismiss: () -> Unit) 
             ) {
                 Text(tool.description, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
-                MonoText(prettySchema(tool), Modifier.fillMaxWidth())
+                MonoText(prettySchema(tool, stringResource(R.string.no_params)), Modifier.fillMaxWidth())
                 TextField(
                     value = args,
                     onValueChange = { args = it },
-                    label = { Text("Args (JSON)") },
+                    label = { Text(stringResource(R.string.args_json)) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 80.dp),
                 )
                 if (pending != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        PillButton("Deny", filled = false, onClick = {
+                        PillButton(stringResource(R.string.deny), filled = false, onClick = {
                             app.toolRunner.resolveConfirm(false, false)
                         })
-                        PillButton("Approve", onClick = {
+                        PillButton(stringResource(R.string.approve), onClick = {
                             app.toolRunner.resolveConfirm(true, false)
                         })
                     }
@@ -180,7 +182,10 @@ private fun ToolDialog(app: BoxAgentApp, tool: ToolSpec, onDismiss: () -> Unit) 
             }
         },
         confirmButton = {
-            PillButton(if (running) "Running…" else "Run", enabled = !running, onClick = {
+            PillButton(
+            if (running) stringResource(R.string.running_btn)
+            else stringResource(R.string.run),
+            enabled = !running, onClick = {
                 running = true
                 result = null
                 scope.launch {
@@ -191,12 +196,12 @@ private fun ToolDialog(app: BoxAgentApp, tool: ToolSpec, onDismiss: () -> Unit) 
                 }
             })
         },
-        dismissButton = { PillButton("Close", filled = false, onClick = onDismiss) },
+        dismissButton = { PillButton(stringResource(R.string.close), filled = false, onClick = onDismiss) },
     )
 }
 
-private fun prettySchema(tool: ToolSpec): String {
-    val props = tool.parameters.optJSONObject("properties") ?: return "(no params)"
+private fun prettySchema(tool: ToolSpec, noParams: String): String {
+    val props = tool.parameters.optJSONObject("properties") ?: return noParams
     val sb = StringBuilder()
     val req = tool.parameters.optJSONArray("required")
     props.keys().forEach { k ->
@@ -204,7 +209,7 @@ private fun prettySchema(tool: ToolSpec): String {
         val required = req?.let { (0 until it.length()).any { i -> it.getString(i) == k } } == true
         sb.append("  $k: ${p.optString("type")}${if (required) " *" else ""} — ${p.optString("description")}\n")
     }
-    return sb.toString().ifEmpty { "(no params)" }
+    return sb.toString().ifEmpty { noParams }
 }
 
 private fun defaultArgs(tool: ToolSpec): String {
@@ -227,3 +232,12 @@ private fun defaultArgs(tool: ToolSpec): String {
     }
     return out.toString()
 }
+
+@Composable
+private fun riskLabel(risk: String): String = stringResource(
+    when (risk) {
+        "readonly" -> R.string.risk_readonly
+        "destructive" -> R.string.risk_destructive
+        else -> R.string.risk_moderate
+    },
+)

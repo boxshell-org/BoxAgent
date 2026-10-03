@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BoxAgent</string>
+    <string name="a11y_service_desc">BoxAgent 使用无障碍权限读取屏幕内容，\
+        并代助手执行点击、滑动与文本输入。</string>
+    <string name="notification_channel">代理运行时</string>
+    <string name="notification_running">BoxAgent 正在运行</string>
+
+    <!-- notifications / service -->
+    <string name="notif_running_task">正在执行任务</string>
+    <string name="notif_watchdog_active">看门狗已激活</string>
+    <string name="notif_restored_boot">开机后已恢复</string>
+    <string name="notif_attention_title">BoxAgent 需要处理</string>
+    <string name="notif_attention_body">重启后 Shell 守护进程已离线，点击重新配对。</string>
+
+    <!-- tabs -->
+    <string name="tab_agent">助手</string>
+    <string name="tab_tools">工具</string>
+    <string name="tab_status">状态</string>
+    <string name="tab_logs">日志</string>
+    <string name="tab_settings">设置</string>
+    <string name="step_count">第 %1$d 步</string>
+
+    <!-- chat -->
+    <string name="chat_new">新建</string>
+    <string name="chat_history">历史</string>
+    <string name="chat_conv">会话 %1$s</string>
+    <string name="chat_working">执行中…</string>
+    <string name="chat_assistant_asks">助手询问</string>
+    <string name="chat_answer_hint">回复…</string>
+    <string name="send">发送</string>
+    <string name="stop">停止</string>
+    <string name="chat_input_hint">让 BoxAgent 做点什么…</string>
+    <string name="tagline">本机智能操作员。</string>
+    <string name="cap_shell">shell</string>
+    <string name="cap_a11y">无障碍</string>
+    <string name="suggest_1">打开设置并关闭动画</string>
+    <string name="suggest_2">我的电量是多少？</string>
+    <string name="suggest_3">截个屏</string>
+    <string name="suggest_4">列出我安装的应用</string>
+    <string name="tool_running">执行中</string>
+    <string name="approve_action">批准操作</string>
+    <string name="deny">拒绝</string>
+    <string name="allow">允许</string>
+    <string name="always">始终允许</string>
+    <string name="approve">批准</string>
+    <string name="conversations">会话</string>
+    <string name="error_no_api_key">请先在设置中填写 LLM API 密钥</string>
+    <string name="error_agent_start">启动代理失败</string>
+
+    <!-- daemon detail -->
+    <string name="d_pairing">配对中…</string>
+    <string name="d_paired_pending">已配对；等待连接</string>
+    <string name="d_connecting_adb">正在连接 adb…</string>
+    <string name="d_daemon_up">守护进程已启动</string>
+    <string name="d_reconnected">已重连</string>
+    <string name="d_daemon_lost">守护进程丢失；正在重启…</string>
+    <string name="d_offline">离线</string>
+    <string name="d_connecting">连接中…</string>
+    <string name="d_pair_failed">配对失败</string>
+    <string name="d_spawn_failed">启动失败</string>
+
+    <!-- status -->
+    <string name="capabilities">能力</string>
+    <string name="shell_daemon">Shell 守护进程</string>
+    <string name="accessibility">无障碍</string>
+    <string name="status_enabled">已启用</string>
+    <string name="status_off">未开启</string>
+    <string name="keep_alive">后台保活</string>
+    <string name="keep_alive_detail">前台服务 + 看门狗</string>
+    <string name="actions">操作</string>
+    <string name="reconnect">重新连接</string>
+    <string name="re_pair">重新配对</string>
+    <string name="connect">连接</string>
+    <string name="enable_a11y">开启无障碍</string>
+    <string name="battery">电池</string>
+    <string name="probe">探测</string>
+    <string name="detail">详情</string>
+    <string name="probe_output">探测输出</string>
+    <string name="how_it_works">工作原理</string>
+    <string name="how_it_works_body">BoxAgent 通过无线调试（开发者选项）配对，\
+        推送一个以 shell 权限运行的 Rust 守护进程，并通过无障碍服务驱动界面。\
+        助手通过这套链路调用原子工具。</string>
+    <string name="pair_device">配对设备</string>
+    <string name="pair_dialog_hint">开发者选项 → 无线调试 → “使用配对码配对”。</string>
+    <string name="host">主机</string>
+    <string name="port">端口</string>
+    <string name="pairing_code">配对码</string>
+    <string name="pair">配对</string>
+    <string name="cancel">取消</string>
+    <string name="connect_spawn_title">连接并启动守护进程</string>
+    <string name="connect_dialog_hint">无线调试主界面（不是配对弹窗）显示的端口才是连接端口。</string>
+
+    <!-- tools -->
+    <string name="search_tools">搜索工具</string>
+    <string name="args_json">参数 (JSON)</string>
+    <string name="running_btn">运行中…</string>
+    <string name="run">运行</string>
+    <string name="close">关闭</string>
+    <string name="no_params">（无参数）</string>
+    <string name="risk_readonly">只读</string>
+    <string name="risk_moderate">中等</string>
+    <string name="risk_destructive">危险</string>
+    <string name="error_generic">错误</string>
+
+    <!-- logs -->
+    <string name="export">导出</string>
+    <string name="clear">清空</string>
+    <plurals name="logs_entry_count">
+        <item quantity="other">%1$d 条</item>
+    </plurals>
+
+    <!-- settings -->
+    <string name="api_key">API 密钥</string>
+    <string name="base_url">接口地址</string>
+    <string name="model">模型</string>
+    <string name="temperature">温度</string>
+    <string name="max_tokens">最大 token 数</string>
+    <string name="system_prompt">系统提示词</string>
+    <string name="save">保存</string>
+    <string name="test">测试</string>
+    <string name="safety">安全</string>
+    <string name="confirm_policy">确认策略</string>
+    <string name="policy_strict">严格</string>
+    <string name="policy_balanced">平衡</string>
+    <string name="policy_autonomous">完全自主</string>
+    <string name="policy_strict_desc">每个非只读工具都会先询问。</string>
+    <string name="policy_balanced_desc">仅危险工具会先询问。</string>
+    <string name="policy_autonomous_desc">不再询问，代理全权执行。</string>
+    <string name="step_cap">步数上限</string>
+    <string name="save_limits">保存限制</string>
+    <string name="runtime">运行时</string>
+    <string name="daemon_watchdog">守护进程看门狗</string>
+    <string name="watchdog_desc">连接断开后重启 shell 守护进程；\
+        应用退到后台时每 15 分钟做一次健康检查。</string>
+    <string name="appearance">外观</string>
+    <string name="theme_system">跟随系统</string>
+    <string name="theme_light">浅色</string>
+    <string name="theme_dark">深色</string>
+    <string name="language">语言</string>
+    <string name="onboarding">新手引导</string>
+    <string name="redo_setup">重新引导</string>
+    <string name="toggle_on">开</string>
+    <string name="toggle_off">关</string>
+
+    <!-- onboarding -->
+    <string name="onboard_tagline">三步，让它拥有行动力。</string>
+    <string name="step1_title">配对无线调试</string>
+    <string name="step1_body">设置 → 开发者选项 → 无线调试 → \
+        “使用配对码配对”。输入那里显示的端口和配对码。</string>
+    <string name="step2_title">启动守护进程</string>
+    <string name="step2_body">现在输入连接端口——无线调试主界面上显示的那个\
+        （与配对端口不同）。</string>
+    <string name="step3_title">无障碍与电池</string>
+    <string name="step3_body">在无障碍设置中启用 BoxAgent，让它能读取屏幕并点击。\
+        将其排除在电池优化之外，让代理在后台存活。</string>
+    <string name="paired">已配对</string>
+    <string name="pairing">配对中…</string>
+    <string name="pairing_port">配对端口</string>
+    <string name="connect_port">连接端口</string>
+    <string name="connecting">连接中…</string>
+    <string name="connect_spawn">连接并启动</string>
+    <string name="finish">完成</string>
+    <string name="skip_for_now">暂时跳过</string>
+    <string name="page_fmt">%1$d / %2$d</string>
+</resources>

@@ -11,6 +11,7 @@ import com.boxagent.app.data.Settings
 import com.boxagent.app.data.db.AppDb
 import com.boxagent.app.data.db.AuditEntry
 import com.boxagent.app.service.AgentService
+import com.boxagent.app.util.LocaleHelper
 import com.boxagent.app.work.HealthWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,7 @@ class BoxAgentApp : Application() {
         toolRunner = ToolRunner(this, daemon, settings, db)
         agent = AgentController(this, settings, secrets, toolRunner, db)
 
+        LocaleHelper.init(this)
         Notifier.ensureChannel(this)
         HealthWorker.schedule(this)
 
@@ -48,7 +50,11 @@ class BoxAgentApp : Application() {
             daemon.reconnect()
             daemon.status.collect { st ->
                 if (st.shell == ShellState.ONLINE && settings.keepWatchdog.first()) {
-                    AgentService.start(this@BoxAgentApp, "watchdog active", wake = false)
+                    AgentService.start(
+                        this@BoxAgentApp,
+                        getString(R.string.notif_watchdog_active),
+                        wake = false,
+                    )
                 }
             }
         }
@@ -72,14 +78,18 @@ class BoxAgentApp : Application() {
         appScope.launch {
             val had = daemon.reconnect() != null
             if (had) {
-                AgentService.start(this@BoxAgentApp, "restored after boot", wake = false)
+                AgentService.start(
+                    this@BoxAgentApp,
+                    getString(R.string.notif_restored_boot),
+                    wake = false,
+                )
             } else {
                 // Wireless debugging resets on reboot on many devices —
                 // surface a repair prompt rather than silently failing.
                 Notifier.post(
                     this@BoxAgentApp,
-                    "BoxAgent needs attention",
-                    "Shell daemon is offline after reboot. Tap to re-pair.",
+                    getString(R.string.notif_attention_title),
+                    getString(R.string.notif_attention_body),
                 )
             }
         }

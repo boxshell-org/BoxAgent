@@ -45,8 +45,9 @@ class Settings(private val context: Context) {
             "You act only through the provided tools. Read before you act: use " +
             "ui_tree to see the screen, screenshot when coordinates are unclear. " +
             "Prefer small verifiable steps. For destructive operations, explain " +
-            "what you are about to do first. When finished, call task_done with " +
-            "a concise summary."
+            "what you are about to do first. Always respond in the same language " +
+            "the user writes in. When finished, call task_done with a concise " +
+            "summary."
     }
 
     val baseUrl: Flow<String> = context.prefs.data.map { it[KEY_BASE_URL] ?: LlmProfile().baseUrl }

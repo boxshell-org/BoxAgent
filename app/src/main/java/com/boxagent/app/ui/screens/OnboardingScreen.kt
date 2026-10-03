@@ -27,8 +27,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.PillButton
@@ -55,6 +57,7 @@ fun OnboardingScreen(app: BoxAgentApp) {
     var connectPort by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
+    var pairedOk by remember { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -63,7 +66,7 @@ fun OnboardingScreen(app: BoxAgentApp) {
     ) {
         Text("BoxAgent", style = MaterialTheme.typography.displayMedium)
         Text(
-            "Three steps to give it hands.",
+            stringResource(R.string.onboard_tagline),
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 8.dp),
@@ -79,24 +82,31 @@ fun OnboardingScreen(app: BoxAgentApp) {
             when (page) {
                 0 -> StepPage(
                     number = "1",
-                    title = "Pair with wireless debugging",
-                    body = "Settings → Developer Options → Wireless Debugging → " +
-                        "“Pair with pairing code”. Enter the port and code shown there.",
-                    status = { StatusPill("paired", st.shell != ShellState.OFFLINE || note?.contains("paired") == true) },
+                    title = stringResource(R.string.step1_title),
+                    body = stringResource(R.string.step1_body),
+                    status = {
+                        StatusPill(
+                            stringResource(R.string.paired),
+                            st.shell != ShellState.OFFLINE || pairedOk,
+                        )
+                    },
                     content = {
-                        Field("Host", host) { host = it }
-                        Field("Pairing port", pairPort) { pairPort = it }
-                        Field("Pairing code", pairCode) { pairCode = it }
+                        Field(stringResource(R.string.host), host) { host = it }
+                        Field(stringResource(R.string.pairing_port), pairPort) { pairPort = it }
+                        Field(stringResource(R.string.pairing_code), pairCode) { pairCode = it }
                     },
                     action = {
                         PillButton(
-                            if (busy) "Pairing…" else "Pair",
+                            stringResource(if (busy) R.string.pairing else R.string.pair),
                             enabled = !busy && pairPort.isNotEmpty() && pairCode.isNotEmpty(),
                             onClick = {
                                 busy = true
                                 scope.launch {
                                     app.daemon.pair(host, pairPort.toIntOrNull() ?: 0, pairCode)
-                                        .onSuccess { note = "paired: $it" }
+                                        .onSuccess {
+                                            pairedOk = true
+                                            note = ctx.getString(R.string.paired) + ": $it"
+                                        }
                                         .onFailure { note = it.message }
                                     busy = false
                                 }
@@ -106,22 +116,21 @@ fun OnboardingScreen(app: BoxAgentApp) {
                 )
                 1 -> StepPage(
                     number = "2",
-                    title = "Spawn the daemon",
-                    body = "Now enter the connect port — the one on the main Wireless " +
-                        "Debugging screen (different from the pairing port).",
+                    title = stringResource(R.string.step2_title),
+                    body = stringResource(R.string.step2_body),
                     status = {
                         StatusPill(
-                            "shell", st.shell == ShellState.ONLINE,
+                            stringResource(R.string.cap_shell), st.shell == ShellState.ONLINE,
                             if (st.shell == ShellState.ONLINE) "uid 2000" else "",
                         )
                     },
                     content = {
-                        Field("Host", host) { host = it }
-                        Field("Connect port", connectPort) { connectPort = it }
+                        Field(stringResource(R.string.host), host) { host = it }
+                        Field(stringResource(R.string.connect_port), connectPort) { connectPort = it }
                     },
                     action = {
                         PillButton(
-                            if (busy) "Connecting…" else "Connect & spawn",
+                            stringResource(if (busy) R.string.connecting else R.string.connect_spawn),
                             enabled = !busy && connectPort.isNotEmpty(),
                             onClick = {
                                 busy = true
@@ -136,20 +145,18 @@ fun OnboardingScreen(app: BoxAgentApp) {
                 )
                 else -> StepPage(
                     number = "3",
-                    title = "Accessibility & battery",
-                    body = "Enable BoxAgent in Accessibility Settings so it can read " +
-                        "screens and tap. Exclude it from battery optimisation so the " +
-                        "agent survives in the background.",
-                    status = { StatusPill("a11y", a11yOn) },
+                    title = stringResource(R.string.step3_title),
+                    body = stringResource(R.string.step3_body),
+                    status = { StatusPill(stringResource(R.string.cap_a11y), a11yOn) },
                     content = {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PillButton("Enable a11y", filled = false, onClick = {
+                            PillButton(stringResource(R.string.enable_a11y), filled = false, onClick = {
                                 ctx.startActivity(
                                     Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
                                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                                 )
                             })
-                            PillButton("Battery", filled = false, onClick = {
+                            PillButton(stringResource(R.string.battery), filled = false, onClick = {
                                 ctx.startActivity(
                                     Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                                         .setData(Uri.parse("package:${ctx.packageName}"))
@@ -160,7 +167,7 @@ fun OnboardingScreen(app: BoxAgentApp) {
                     },
                     action = {
                         PillButton(
-                            "Finish",
+                            stringResource(R.string.finish),
                             enabled = st.shell == ShellState.ONLINE,
                             onClick = {
                                 scope.launch {
@@ -188,11 +195,11 @@ fun OnboardingScreen(app: BoxAgentApp) {
                 .padding(top = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            PillButton("Skip for now", filled = false, onClick = {
+            PillButton(stringResource(R.string.skip_for_now), filled = false, onClick = {
                 scope.launch { app.settings.setOnboarded(true) }
             })
             Text(
-                "${pager.currentPage + 1} / 3",
+                stringResource(R.string.page_fmt, pager.currentPage + 1, 3),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -201,7 +208,7 @@ fun OnboardingScreen(app: BoxAgentApp) {
 
     // Auto-advance on success
     LaunchedEffect(st.shell, pager.currentPage) {
-        if (pager.currentPage == 0 && note?.startsWith("paired") == true) {
+        if (pager.currentPage == 0 && pairedOk) {
             delay(600); pager.animateScrollToPage(1)
         } else if (pager.currentPage == 1 && st.shell == ShellState.ONLINE) {
             delay(600); pager.animateScrollToPage(2)

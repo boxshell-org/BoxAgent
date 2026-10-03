@@ -25,8 +25,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.BwCard
@@ -52,66 +54,65 @@ fun StatusScreen(app: BoxAgentApp) {
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        SectionLabel("Capabilities")
+        SectionLabel(stringResource(R.string.capabilities))
         BwCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                CapabilityRow("Shell daemon", st.shell == ShellState.ONLINE,
+                CapabilityRow(stringResource(R.string.shell_daemon), st.shell == ShellState.ONLINE,
                     when (st.shell) {
                         ShellState.ONLINE -> "uid 2000"
-                        ShellState.PAIRING -> "pairing…"
-                        ShellState.CONNECTING -> "connecting…"
-                        ShellState.ERROR -> st.detail
-                        else -> "offline"
+                        ShellState.PAIRING -> stringResource(R.string.d_pairing)
+                        ShellState.CONNECTING -> stringResource(R.string.d_connecting)
+                        ShellState.ERROR -> daemonDetail(st.detail)
+                        else -> stringResource(R.string.d_offline)
                     })
-                CapabilityRow("Accessibility", A11yService.isEnabled,
-                    if (A11yService.isEnabled) "enabled" else "off")
-                CapabilityRow("Keep-alive", true, "foreground + watchdog")
+                CapabilityRow(stringResource(R.string.accessibility), A11yService.isEnabled,
+                    stringResource(if (A11yService.isEnabled) R.string.status_enabled else R.string.status_off))
+                CapabilityRow(stringResource(R.string.keep_alive), true,
+                    stringResource(R.string.keep_alive_detail))
             }
         }
 
-        SectionLabel("Actions")
+        SectionLabel(stringResource(R.string.actions))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton("Reconnect", filled = false, onClick = {
+            PillButton(stringResource(R.string.reconnect), filled = false, onClick = {
                 scope.launch { app.daemon.reconnect() }
             })
-            PillButton("Re-pair", filled = false, onClick = { showPair = true })
-            PillButton("Connect", filled = false, onClick = { showConnect = true })
+            PillButton(stringResource(R.string.re_pair), filled = false, onClick = { showPair = true })
+            PillButton(stringResource(R.string.connect), filled = false, onClick = { showConnect = true })
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton("Enable a11y", filled = false, onClick = {
+            PillButton(stringResource(R.string.enable_a11y), filled = false, onClick = {
                 ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             })
-            PillButton("Battery", filled = false, onClick = {
+            PillButton(stringResource(R.string.battery), filled = false, onClick = {
                 ctx.startActivity(
                     Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                         .setData(Uri.parse("package:${ctx.packageName}"))
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
             })
-            PillButton("Probe", filled = false, onClick = {
+            PillButton(stringResource(R.string.probe), filled = false, onClick = {
                 scope.launch {
                     probe = runCatching {
                         app.daemon.requireClient().exec("id; uname -a").stdout
-                    }.getOrElse { it.message ?: "error" }
+                    }.getOrElse { it.message ?: ctx.getString(R.string.error_generic) }
                 }
             })
         }
 
         st.detail.takeIf { it.isNotEmpty() }?.let {
-            SectionLabel("Detail")
-            MonoText(it)
+            SectionLabel(stringResource(R.string.detail))
+            MonoText(daemonDetail(it))
         }
         probe?.let {
-            SectionLabel("Probe output")
+            SectionLabel(stringResource(R.string.probe_output))
             MonoText(it)
         }
 
-        SectionLabel("How it works")
+        SectionLabel(stringResource(R.string.how_it_works))
         Text(
-            "BoxAgent pairs with wireless debugging (Developer Options), pushes a " +
-            "Rust daemon that runs with shell permissions, and drives UI through " +
-            "accessibility. The assistant calls atomic tools through that stack.",
+            stringResource(R.string.how_it_works_body),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -166,24 +167,24 @@ fun PairDialog(onPair: (host: String, port: String, code: String) -> Unit, onDis
     var code by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Pair device", style = MaterialTheme.typography.titleMedium) },
+        title = { Text(stringResource(R.string.pair_device), style = MaterialTheme.typography.titleMedium) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Developer Options → Wireless Debugging → “Pair with pairing code”.",
+                    stringResource(R.string.pair_dialog_hint),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextField(value = host, onValueChange = { host = it }, label = { Text("Host") })
-                TextField(value = port, onValueChange = { port = it }, label = { Text("Port") })
-                TextField(value = code, onValueChange = { code = it }, label = { Text("Pairing code") })
+                TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) })
+                TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) })
+                TextField(value = code, onValueChange = { code = it }, label = { Text(stringResource(R.string.pairing_code)) })
             }
         },
         confirmButton = {
-            PillButton("Pair", onClick = { onPair(host, port, code) },
+            PillButton(stringResource(R.string.pair), onClick = { onPair(host, port, code) },
                 enabled = port.isNotEmpty() && code.isNotEmpty())
         },
-        dismissButton = { PillButton("Cancel", filled = false, onClick = onDismiss) },
+        dismissButton = { PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss) },
     )
 }
 
@@ -193,21 +194,38 @@ fun ConnectDialog(onConnect: (host: String, port: String) -> Unit, onDismiss: ()
     var port by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Connect & spawn daemon", style = MaterialTheme.typography.titleMedium) },
+        title = { Text(stringResource(R.string.connect_spawn_title), style = MaterialTheme.typography.titleMedium) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "Wireless Debugging main screen (not the pairing dialog) shows the connect port.",
+                    stringResource(R.string.connect_dialog_hint),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextField(value = host, onValueChange = { host = it }, label = { Text("Host") })
-                TextField(value = port, onValueChange = { port = it }, label = { Text("Port") })
+                TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) })
+                TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) })
             }
         },
         confirmButton = {
-            PillButton("Connect", onClick = { onConnect(host, port) }, enabled = port.isNotEmpty())
+            PillButton(stringResource(R.string.connect), onClick = { onConnect(host, port) }, enabled = port.isNotEmpty())
         },
-        dismissButton = { PillButton("Cancel", filled = false, onClick = onDismiss) },
+        dismissButton = { PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss) },
     )
+}
+
+/** Map "key:*" status tokens emitted by DaemonManager to localized text. */
+@Composable
+private fun daemonDetail(detail: String): String {
+    val res = when (detail.removePrefix("key:")) {
+        "pairing" -> R.string.d_pairing
+        "paired_pending" -> R.string.d_paired_pending
+        "connecting_adb" -> R.string.d_connecting_adb
+        "daemon_up" -> R.string.d_daemon_up
+        "reconnected" -> R.string.d_reconnected
+        "daemon_lost" -> R.string.d_daemon_lost
+        "pair_failed" -> R.string.d_pair_failed
+        "spawn_failed" -> R.string.d_spawn_failed
+        else -> return detail
+    }
+    return stringResource(res)
 }

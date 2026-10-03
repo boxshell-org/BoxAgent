@@ -8,7 +8,8 @@ uses **Accessibility** to see and touch the screen. A user-supplied
 OpenAI-compatible LLM then drives the phone through ~37 atomic tools
 (`shell_exec`, `ui_tree`, `tap`, `type_text`, `screenshot`, `app_*`, …) with a
 risk-based confirmation policy. The UI is Jetpack Compose in a monochrome
-Apple-style design language.
+Apple-style design language, fully bilingual (English / 中文 — follow system
+or pick in Settings).
 
 ## Architecture
 

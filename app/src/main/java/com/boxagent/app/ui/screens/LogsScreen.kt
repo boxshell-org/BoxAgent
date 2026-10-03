@@ -18,8 +18,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
+import com.boxagent.app.R
 import com.boxagent.app.ui.Hairline
 import com.boxagent.app.ui.components.MonoText
 import com.boxagent.app.ui.components.PillButton
@@ -43,7 +46,7 @@ fun LogsScreen(app: BoxAgentApp) {
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PillButton("Export", filled = false, onClick = {
+            PillButton(stringResource(R.string.export), filled = false, onClick = {
                 scope.launch {
                     val all = app.db.audit().exportAll()
                     val json = org.json.JSONArray()
@@ -68,11 +71,11 @@ fun LogsScreen(app: BoxAgentApp) {
                     )
                 }
             })
-            PillButton("Clear", filled = false, onClick = {
+            PillButton(stringResource(R.string.clear), filled = false, onClick = {
                 scope.launch { app.db.audit().clear() }
             })
             Text(
-                "${entries.size} entries",
+                pluralStringResource(R.plurals.logs_entry_count, entries.size, entries.size),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.align(Alignment.CenterVertically),

@@ -19,6 +19,7 @@
     <application
         android:name=".BoxAgentApp"
         android:label="BoxAgent"
+        android:localeConfig="@xml/locales_config"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:supportsRtl="true"

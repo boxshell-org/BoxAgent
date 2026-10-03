@@ -16,7 +16,11 @@ object Notifier {
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Agent runtime", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(
+                CHANNEL,
+                context.getString(R.string.notification_channel),
+                NotificationManager.IMPORTANCE_LOW,
+            ),
         )
     }
 
