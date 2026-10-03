@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+        working-directory: core
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+        working-directory: core
+      - name: cargo test
+        run: cargo test --workspace
+        working-directory: core
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-35" "build-tools;34.0.0" "ndk;27.0.12077973"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2
+      - name: Build Rust native libs
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+        run: bash scripts/build-rust.sh "$PWD/app/src/main/jniLibs"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug -PskipRustBuild=true --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: boxagent-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14

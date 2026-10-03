@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-35" "build-tools;34.0.0" "ndk;27.0.12077973"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2
+      - name: Build Rust native libs
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
+        run: bash scripts/build-rust.sh "$PWD/app/src/main/jniLibs"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug -PskipRustBuild=true --console=plain
+      - name: Rename artifact
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk \
+             "BoxAgent-${{ github.ref_name }}.apk"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "BoxAgent ${{ github.ref_name }}" \
+            --prerelease \
+            --generate-notes \
+            "BoxAgent-${{ github.ref_name }}.apk"
