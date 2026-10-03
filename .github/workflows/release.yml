@@ -30,9 +30,9 @@ jobs:
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --version 4.1.2
       - name: Build Rust native libs
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.12077973
-        run: bash scripts/build-rust.sh "$PWD/app/src/main/jniLibs"
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
+          bash scripts/build-rust.sh "$PWD/app/src/main/jniLibs"
       - uses: gradle/actions/setup-gradle@v4
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug -PskipRustBuild=true --console=plain
