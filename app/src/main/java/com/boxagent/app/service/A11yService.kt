@@ -361,5 +361,33 @@ class A11yService : AccessibilityService() {
         @Volatile var instance: A11yService? = null
             private set
         val isEnabled: Boolean get() = instance != null
+
+        /**
+         * Whether the user granted this service in system settings —
+         * authoritative even before the system binds it to our process
+         * (the bind can lag a grant by seconds, or a whole app lifetime
+         * if the service hasn't been needed yet).
+         */
+        fun isGranted(ctx: android.content.Context): Boolean {
+            val enabled = android.provider.Settings.Secure.getString(
+                ctx.contentResolver,
+                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+            ) ?: return false
+            val self = android.content.ComponentName(ctx, A11yService::class.java)
+                .flattenToShortString()
+            return enabled.split(':').any {
+                android.content.ComponentName.unflattenFromString(it)
+                    ?.flattenToShortString() == self
+            }
+        }
+
+        /** Wait briefly for the system to bind the service after a grant. */
+        suspend fun awaitInstance(timeoutMs: Long = 3000): A11yService? {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (instance == null && System.currentTimeMillis() < deadline) {
+                delay(100)
+            }
+            return instance
+        }
     }
 }

@@ -164,7 +164,8 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "file_read", "Read a file",
-            "Read a file's bytes (shell permissions). Returns base64 + size.",
+            "Read a file (shell permissions). Returns text when UTF-8 \
+             decodable, base64 otherwise.",
             obj(json!({"path": s("Absolute path")}), &["path"]),
             Readonly, "shell",
         ),
@@ -203,7 +204,8 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "input_tap", "Tap (input CLI)",
-            "Tap via the `input` command. Prefer `tap` (accessibility) — this is a fallback.",
+            "Tap via the `input` command (spawns a JVM on-device — slow). \
+             Prefer `tap` (accessibility) — this is a fallback.",
             obj(json!({
                 "x": i("X coordinate"), "y": i("Y coordinate")
             }), &["x", "y"]),
@@ -211,7 +213,8 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "input_swipe", "Swipe (input CLI)",
-            "Swipe via the `input` command with duration.",
+            "Swipe via the `input` command (spawns a JVM on-device — slow). \
+             Prefer `swipe` (accessibility).",
             obj(json!({
                 "x1": i("Start X"), "y1": i("Start Y"),
                 "x2": i("End X"), "y2": i("End Y"),
@@ -221,13 +224,16 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "input_text", "Type text (input CLI)",
-            "Insert text via `input text`. ASCII-safe path; prefer `type_text`.",
+            "Insert text via `input text` (spawns a JVM on-device — slow, \
+             ASCII-only). Prefer `type_text` (accessibility).",
             obj(json!({"text": s("Text to input")}), &["text"]),
             Moderate, "shell",
         ),
         t(
             "input_key", "Key event (input CLI)",
-            "Send a KEYEVENT code via `input keyevent` (e.g. KEYCODE_BACK, 4).",
+            "Send a KEYEVENT code via `input keyevent` (spawns a JVM \
+             on-device — slow). Prefer `key` (accessibility) for global \
+             actions like back/home.",
             obj(json!({"key": s("Key name or numeric code")}), &["key"]),
             Moderate, "shell",
         ),

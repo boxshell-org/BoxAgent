@@ -60,30 +60,36 @@ fun SettingsScreen(app: BoxAgentApp) {
     val scope = rememberCoroutineScope()
     val s = app.settings
 
-    val baseUrl by s.baseUrl.collectAsState(initial = "")
-    val model by s.model.collectAsState(initial = "")
-    val temperature by s.temperature.collectAsState(initial = 0.2)
-    val maxTokens by s.maxTokens.collectAsState(initial = 4096)
-    val systemPrompt by s.systemPrompt.collectAsState(initial = "")
     val policy by s.confirmPolicy.collectAsState(initial = ConfirmPolicy.BALANCED)
-    val maxSteps by s.maxSteps.collectAsState(initial = 40)
     val keepWatchdog by s.keepWatchdog.collectAsState(initial = true)
     val theme by s.theme.collectAsState(initial = "system")
 
     var apiKey by remember { mutableStateOf(app.secrets.apiKey) }
-    var url by remember(baseUrl) { mutableStateOf(baseUrl) }
-    var mdl by remember(model) { mutableStateOf(model) }
-    var tempStr by remember(temperature) { mutableStateOf(temperature.toString()) }
-    var tokStr by remember(maxTokens) { mutableStateOf(maxTokens.toString()) }
-    var sysPrompt by remember(systemPrompt) { mutableStateOf(systemPrompt) }
-    var stepsStr by remember(maxSteps) { mutableStateOf(maxSteps.toString()) }
+    var url by remember { mutableStateOf("") }
+    var mdl by remember { mutableStateOf("") }
+    var tempStr by remember { mutableStateOf("") }
+    var tokStr by remember { mutableStateOf("") }
+    var sysPrompt by remember { mutableStateOf("") }
+    var stepsStr by remember { mutableStateOf("") }
     var testResult by remember { mutableStateOf<String?>(null) }
 
-    // Draft persistence: edits must not die with the composable. The key is
-    // written through on every change; the rest of the LLM draft commits
-    // when the screen leaves composition (same as pressing Save).
+    // Draft lifecycle: fill fields once the first DataStore frame arrives.
+    // `loaded` gates the dispose-commit — a still-empty early draft must
+    // never overwrite persisted settings on a quick tab switch.
+    var loaded by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        url = s.baseUrl.first()
+        mdl = s.model.first()
+        tempStr = s.temperature.first().toString()
+        tokStr = s.maxTokens.first().toString()
+        sysPrompt = s.systemPrompt.first()
+        stepsStr = s.maxSteps.first().toString()
+        loaded = true
+    }
+
     androidx.compose.runtime.DisposableEffect(Unit) {
         onDispose {
+            if (!loaded) return@onDispose
             val u = url
             val m = mdl
             val t = tempStr.toDoubleOrNull() ?: 0.2

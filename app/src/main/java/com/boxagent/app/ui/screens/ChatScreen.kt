@@ -69,9 +69,13 @@ fun ChatScreen(app: BoxAgentApp) {
     val pendingConfirm by app.toolRunner.pending.collectAsState()
     val daemonStatus by app.daemon.status.collectAsState()
     val scope = rememberCoroutineScope()
-    var input by remember { mutableStateOf("") }
+    var input by androidx.compose.runtime.saveable.rememberSaveable {
+        mutableStateOf("")
+    }
     var showHistory by remember { mutableStateOf(false) }
-    var answer by remember { mutableStateOf("") }
+    var answer by androidx.compose.runtime.saveable.rememberSaveable {
+        mutableStateOf("")
+    }
 
     Column(Modifier.fillMaxSize().imePadding()) {
         // Conversation controls
@@ -305,7 +309,10 @@ private fun EmptyState(app: BoxAgentApp, shellOnline: Boolean, onPrompt: (String
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             StatusPill(stringResource(R.string.cap_shell), shellOnline)
-            StatusPill(stringResource(R.string.cap_a11y), A11yService.isEnabled)
+            StatusPill(
+                stringResource(R.string.cap_a11y),
+                A11yService.isGranted(androidx.compose.ui.platform.LocalContext.current),
+            )
         }
         Column(
             Modifier.padding(top = 40.dp),

@@ -13,10 +13,13 @@ import com.boxagent.app.data.db.AuditEntry
 import com.boxagent.app.data.db.ToolCallRecord
 import com.boxagent.app.service.A11yService
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -42,6 +45,7 @@ class ToolRunner(
 ) {
     private val _pending = MutableStateFlow<PendingConfirm?>(null)
     val pending: StateFlow<PendingConfirm?> = _pending
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val alwaysAllowed = mutableSetOf<String>()
     @Volatile var conversationId: Long = 0
@@ -77,9 +81,9 @@ class ToolRunner(
 
         if (needsConfirm(name)) {
             val approved = awaitConfirm(name, argsJson)
-            audit("tool_call", "$name denied=$approved args=redacted", approved)
+            ioScope.launch { audit("tool_call", "$name denied=$approved args=redacted", approved) }
             if (!approved) {
-                record(name, argsJson, "denied", false, start)
+                ioScope.launch { record(name, argsJson, "denied", false, start) }
                 return JSONObject().put("ok", false).put("error", "user denied").toString()
             }
         }
@@ -92,8 +96,12 @@ class ToolRunner(
 
         val ok = result.optBoolean("ok", true)
         val redacted = redact(result)
-        record(name, argsJson, redacted.toString(), ok, start)
-        audit("tool_call", "$name ok=$ok", ok)
+        // Persistence is observability, not correctness — don't make the
+        // agent wait on Room.
+        ioScope.launch {
+            record(name, argsJson, redacted.toString(), ok, start)
+            audit("tool_call", "$name ok=$ok", ok)
+        }
         return result.toString()
     }
 
@@ -112,15 +120,58 @@ class ToolRunner(
             }
             // -------- shell backend ----------
             "shell_exec" -> shellExec(a.getString("cmd"), a.optLong("timeout_ms", 30_000))
-            "app_list" -> shellExec(
-                "pm list packages ${if (a.optBoolean("third_party_only")) "-3" else ""} -f"
-            )
-            "app_launch" -> {
+            "app_list" -> runCatching {
+                // Direct PackageManager read — the `pm` CLI costs a JVM spawn.
+                val pm = context.packageManager
+                val thirdOnly = a.optBoolean("third_party_only")
+                val arr = JSONArray()
+                pm.getInstalledApplications(0)
+                    .filter {
+                        !thirdOnly ||
+                            (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0
+                    }
+                    .sortedBy { it.packageName }
+                    .forEach {
+                        arr.put(
+                            JSONObject()
+                                .put("package", it.packageName)
+                                .put("label", pm.getApplicationLabel(it).toString()),
+                        )
+                    }
+                ok().put("count", arr.length()).put("apps", arr)
+            }.getOrElse { err(it) }
+            "app_launch" -> runCatching {
+                val pkg = a.getString("package")
                 val comp = a.optString("component")
-                if (comp.isNotEmpty())
-                    shellExec("am start -n $comp")
-                else
-                    shellExec("monkey -p ${a.getString("package")} -c android.intent.category.LAUNCHER 1")
+                val intent = if (comp.isNotEmpty()) {
+                    val cls = when {
+                        comp.startsWith(".") -> pkg + comp
+                        comp.contains(".") -> comp
+                        else -> "$pkg.$comp"
+                    }
+                    Intent().setComponent(android.content.ComponentName(pkg, cls))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                } else {
+                    context.packageManager.getLaunchIntentForPackage(pkg)
+                        ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        ?: throw IllegalStateException("no launcher activity for $pkg")
+                }
+                context.startActivity(intent)
+                ok()
+            }.getOrElse { e ->
+                // Shell uid can still reach non-exported components and
+                // leanback-only launchers that PackageManager can't see.
+                val comp = a.optString("component")
+                if (comp.isNotEmpty()) {
+                    val spec = if (comp.contains("/")) comp
+                        else "${a.getString("package")}/$comp"
+                    shellExec("am start -n $spec")
+                } else {
+                    shellExec(
+                        "monkey -p ${a.getString("package")}" +
+                            " -c android.intent.category.LAUNCHER 1",
+                    )
+                }
             }
             "app_stop" -> shellExec("am force-stop ${a.getString("package")}")
             "app_install" -> shellExec(
@@ -129,13 +180,49 @@ class ToolRunner(
             "app_uninstall" -> shellExec("pm uninstall ${a.getString("package")}")
             "app_clear_data" -> shellExec("pm clear ${a.getString("package")}")
             "screen_capture" -> screencapResult()
-            "screen_info" -> shellExec("wm size; wm density; dumpsys window | grep -E 'mCurrentRotation|DisplayWidth|DisplayHeight' | head -6")
-            "device_info" -> shellExec(
-                "getprop ro.product.model; getprop ro.build.version.release; " +
-                "getprop ro.build.version.sdk; dumpsys battery | head -12; " +
-                "ip addr show wlan0 2>/dev/null | grep 'inet ' || true"
-            )
-            "settings_get" -> shellExec("settings get ${a.getString("namespace")} ${a.getString("key")}")
+            "screen_info" -> runCatching {
+                val dm = context.resources.displayMetrics
+                ok().put("width", dm.widthPixels)
+                    .put("height", dm.heightPixels)
+                    .put("density_dpi", dm.densityDpi)
+                    .put("density", dm.density.toDouble())
+            }.getOrElse { err(it) }
+            "device_info" -> runCatching {
+                val bm = context.getSystemService(Context.BATTERY_SERVICE)
+                    as android.os.BatteryManager
+                val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+                    as android.net.ConnectivityManager
+                val net = cm.activeNetwork
+                    ?.let { cm.getNetworkCapabilities(it) }
+                    ?.let {
+                        when {
+                            it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                            it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+                            it.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                            else -> "other"
+                        }
+                    } ?: "offline"
+                ok().put("model", android.os.Build.MODEL)
+                    .put("android", android.os.Build.VERSION.RELEASE)
+                    .put("sdk", android.os.Build.VERSION.SDK_INT)
+                    .put("battery_pct",
+                        bm.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY))
+                    .put("network", net)
+            }.getOrElse { err(it) }
+            "settings_get" -> runCatching {
+                val v = when (a.getString("namespace")) {
+                    "secure" -> android.provider.Settings.Secure.getString(
+                        context.contentResolver, a.getString("key"))
+                    "global" -> android.provider.Settings.Global.getString(
+                        context.contentResolver, a.getString("key"))
+                    else -> android.provider.Settings.System.getString(
+                        context.contentResolver, a.getString("key"))
+                }
+                ok().put("value", v ?: JSONObject.NULL)
+            }.getOrElse {
+                // Some keys need shell-level read — fall back to the daemon.
+                shellExec("settings get ${a.getString("namespace")} ${a.getString("key")}")
+            }
             "settings_put" -> shellExec("settings put ${a.getString("namespace")} ${a.getString("key")} ${a.getString("value")}")
             "file_read" -> runCatching {
                 val bytes = daemon.requireClient().fileRead(a.getString("path"))
@@ -162,8 +249,33 @@ class ToolRunner(
                 ok().put("entries", JSONArray(daemon.requireClient().fileList(a.getString("path"))))
             }.getOrElse { err(it) }
             "process_list" -> shellExec("ps -A -o PID,USER,NAME,%CPU,RSS | head -80")
-            "clipboard_get" -> shellExec("cmd clipboard get 2>/dev/null || service call clipboard 2 | head -4")
-            "clipboard_set" -> shellExec("cmd clipboard set '${a.getString("text").replace("'", "'\\''")}'")
+            "clipboard_get" -> runCatching {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                val t = cm.primaryClip
+                    ?.takeIf { it.itemCount > 0 }
+                    ?.getItemAt(0)?.coerceToText(context)?.toString()
+                    ?: throw IllegalStateException("empty")
+                ok().put("text", t)
+            }.getOrElse {
+                // Background clipboard reads are restricted (Android 10+) —
+                // the shell-uid daemon bypasses them.
+                shellExec("cmd clipboard get 2>/dev/null || service call clipboard 2 | head -4")
+            }
+            "clipboard_set" -> runCatching {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                cm.setPrimaryClip(
+                    android.content.ClipData.newPlainText("boxagent", a.getString("text")))
+                // Android 10+ silently denies background writes — verify.
+                val wrote = cm.primaryClip?.getItemAt(0)?.text?.toString() ==
+                    a.getString("text")
+                if (!wrote) throw IllegalStateException("denied")
+                ok()
+            }.getOrElse {
+                shellExec(
+                    "cmd clipboard set '${a.getString("text").replace("'", "'\\''")}'")
+            }
             "input_tap" -> shellExec("input tap ${a.getInt("x")} ${a.getInt("y")}")
             "input_swipe" -> shellExec(
                 "input swipe ${a.getInt("x1")} ${a.getInt("y1")} ${a.getInt("x2")} ${a.getInt("y2")} ${a.optInt("duration_ms", 300)}"
@@ -256,10 +368,15 @@ class ToolRunner(
     }
 
     private suspend fun a11y(block: suspend (A11yService) -> JSONObject): JSONObject {
-        val svc = A11yService.instance
+        // instance can lag the settings grant — wait briefly before failing.
+        val svc = A11yService.instance ?: A11yService.awaitInstance(2_500)
             ?: return JSONObject().put("ok", false)
                 .put("error", "accessibility service not enabled")
-        return withContext(Dispatchers.Main) { block(svc) }
+        // Everything used is binder-based (node ops, dispatchGesture,
+        // performGlobalAction) or takes an explicit executor (takeScreenshot)
+        // — safe off-main, and it keeps tool calls off the composer's thread
+        // while the UI is busy recomposing.
+        return withContext(Dispatchers.Default) { block(svc) }
     }
 
     private suspend fun shellExec(cmd: String, timeout: Long = 30_000): JSONObject {

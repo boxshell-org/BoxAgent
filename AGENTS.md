@@ -16,6 +16,12 @@ Everything lives under `/www/boxagent-toolchain` (the home partition is small):
 Rust targets installed: `aarch64-linux-android`, `x86_64-linux-android`,
 `armv7-linux-androideabi`, host `x86_64-unknown-linux-gnu`.
 
+`core/target` is a symlink to `/www/boxagent-target/core` — it holds all
+build profiles (host debug/test, android release). Do NOT `cargo clean`
+or delete it; a cold dep rebuild costs ~4 min while an incremental
+`cargo test` is ~1 s. Gradle cache/parallel are already on in
+gradle.properties.
+
 ## Build
 
     # Rust workspace check + tests (host)

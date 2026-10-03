@@ -74,8 +74,12 @@ fun StatusScreen(app: BoxAgentApp) {
                         ShellState.ERROR -> daemonDetail(st.detail)
                         else -> stringResource(R.string.d_offline)
                     })
-                CapabilityRow(stringResource(R.string.accessibility), A11yService.isEnabled,
-                    stringResource(if (A11yService.isEnabled) R.string.status_enabled else R.string.status_off))
+                CapabilityRow(stringResource(R.string.accessibility),
+                    A11yService.isGranted(ctx),
+                    stringResource(
+                        if (A11yService.isGranted(ctx))
+                            R.string.status_enabled else R.string.status_off,
+                    ))
                 CapabilityRow(stringResource(R.string.keep_alive), true,
                     stringResource(R.string.keep_alive_detail))
             }

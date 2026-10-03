@@ -220,10 +220,11 @@ fun OnboardingScreen(app: BoxAgentApp) {
 
 @Composable
 private fun rememberA11yState(): Boolean {
-    var on by remember { mutableStateOf(A11yService.isEnabled) }
+    val ctx = LocalContext.current
+    var on by remember { mutableStateOf(A11yService.isGranted(ctx)) }
     LaunchedEffect(Unit) {
         while (true) {
-            on = A11yService.isEnabled
+            on = A11yService.isGranted(ctx)
             delay(1000)
         }
     }

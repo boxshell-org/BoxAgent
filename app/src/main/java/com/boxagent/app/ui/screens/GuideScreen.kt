@@ -67,7 +67,7 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     val st by app.daemon.status.collectAsState()
 
-    var a11yOn by remember { mutableStateOf(A11yService.isEnabled) }
+    var a11yOn by remember { mutableStateOf(A11yService.isGranted(ctx)) }
     var notifOn by remember { mutableStateOf(notifGranted(ctx)) }
     var battOn by remember { mutableStateOf(batteryExempt(ctx)) }
     var showPair by remember { mutableStateOf(false) }
@@ -75,7 +75,7 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         while (true) {
-            a11yOn = A11yService.isEnabled
+            a11yOn = A11yService.isGranted(ctx)
             notifOn = notifGranted(ctx)
             battOn = batteryExempt(ctx)
             delay(1000)
