@@ -12,6 +12,10 @@ use thiserror::Error;
 
 const MAX_TOOL_RESULT: usize = 8000;
 const MAX_HISTORY_MSGS: usize = 80;
+/// Rough byte budget for the rolling context (≈16k tokens of JSON text).
+const MAX_CONTEXT_BYTES: usize = 64_000;
+/// Tool results bigger than this that repeat unchanged collapse to a marker.
+const DEDUP_MIN: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -21,6 +25,10 @@ pub struct AgentConfig {
     pub history: Vec<Value>,
     pub max_steps: u32,
     pub max_wall_ms: u64,
+    /// Send short `summary` strings instead of full `description` in tool
+    /// schemas — much smaller `tools[]` payload on endpoints without
+    /// server-side prompt caching.
+    pub compact_tools: bool,
 }
 
 #[derive(Debug, Error)]
@@ -88,8 +96,12 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
         messages.extend(self.cfg.history.iter().cloned());
         messages.push(json!({"role": "user", "content": self.cfg.prompt}));
 
-        let tools = registry::openai_tools();
+        let tools = registry::openai_tools(self.cfg.compact_tools);
         let mut steps = 0u32;
+        // tool name -> last result body, for collapsing repeated identical
+        // outputs (e.g. ui_tree on an unchanged screen).
+        let mut last_results: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         loop {
             self.check_cancel()?;
@@ -107,6 +119,10 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
                 self.sink.emit(json!({"type": "text_delta", "text": delta}));
             })
             .await?;
+
+            if let Some(u) = &assistant.usage {
+                self.sink.emit(json!({"type": "usage", "usage": u}));
+            }
 
             if assistant.tool_calls.is_empty() {
                 messages.push(json!({
@@ -168,15 +184,25 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
                     return Ok(summary);
                 } else {
                     let t0 = Instant::now();
-                    let out = self.executor.execute(&call.name, &call.arguments);
+                    let out = sanitize_result(self.executor.execute(&call.name, &call.arguments));
+                    let feed = match last_results.get(&call.name) {
+                        // Identical large result again (unchanged screen etc.):
+                        // feed a marker; the real content is still in context.
+                        Some(prev) if *prev == out && out.len() > DEDUP_MIN => {
+                            json!({"ok": true, "note": "unchanged from previous call"})
+                                .to_string()
+                        }
+                        _ => out.clone(),
+                    };
+                    last_results.insert(call.name.clone(), out.clone());
                     self.sink.emit(json!({
                         "type": "tool_result",
                         "id": call.id,
                         "name": call.name,
-                        "result": truncate(&out, MAX_TOOL_RESULT),
+                        "result": truncate(&feed, MAX_TOOL_RESULT),
                         "duration_ms": t0.elapsed().as_millis() as u64,
                     }));
-                    out
+                    feed
                 };
 
                 messages.push(json!({
@@ -186,11 +212,14 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
                 }));
             }
 
-            // Keep the window bounded: drop oldest tool messages, keeping
-            // system + first user + last N messages.
-            if messages.len() > MAX_HISTORY_MSGS {
+            // Keep the window bounded, by message count AND by bytes:
+            // drop the oldest tool exchanges, keeping the head (system +
+            // first user prompt). Rare; it breaks prefix cache either way.
+            let too_many = messages.len() > MAX_HISTORY_MSGS;
+            let too_big: usize = messages.iter().map(|m| m.to_string().len()).sum();
+            if too_many || too_big > MAX_CONTEXT_BYTES {
                 let keep_head = 2usize;
-                let tail = MAX_HISTORY_MSGS - keep_head;
+                let tail = (MAX_HISTORY_MSGS - keep_head).min(messages.len().saturating_sub(keep_head));
                 messages = [
                     messages[..keep_head].to_vec(),
                     vec![json!({
@@ -200,6 +229,9 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
                     messages[messages.len() - tail..].to_vec(),
                 ]
                 .concat();
+                // Still over the byte budget (a few huge results): shrink
+                // older tool messages to their first 200 chars.
+                shrink_old_tool_results(&mut messages, MAX_CONTEXT_BYTES);
             }
         }
     }
@@ -214,4 +246,54 @@ fn truncate(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…[truncated {} bytes]", &s[..end], s.len() - end)
+}
+
+/// Strip binary payloads (base64 screenshots / file dumps) from tool
+/// results — a text-only chat model can't see them and they cost tens of
+/// thousands of tokens every request. Keeps a short receipt instead.
+fn sanitize_result(raw: String) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(&raw) else {
+        return raw;
+    };
+    let Some(obj) = v.as_object_mut() else {
+        return raw;
+    };
+    if let Some(b64) = obj.remove("data_b64") {
+        let bytes = b64.as_str().map(|s| s.len() * 3 / 4).unwrap_or(0);
+        obj.insert("bytes".into(), json!(bytes));
+        obj.insert(
+            "note".into(),
+            json!("binary data omitted; use ui_tree/ui_find for screen structure"),
+        );
+    }
+    v.to_string()
+}
+
+/// Second-pass shrink when the rolling context still exceeds `budget`:
+/// older tool messages (all but the last 4) collapse to a 200-char head.
+fn shrink_old_tool_results(messages: &mut Vec<Value>, budget: usize) {
+    let tool_idx: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m["role"] == "tool")
+        .map(|(i, _)| i)
+        .collect();
+    let keep_full = 4usize;
+    for &i in tool_idx.iter().take(tool_idx.len().saturating_sub(keep_full)) {
+        if let Some(c) = messages[i]["content"].as_str() {
+            if c.len() > 200 {
+                messages[i]["content"] = json!(truncate(c, 200));
+            }
+        }
+    }
+    // Final resort: if still over budget, hard-truncate every tool message.
+    if messages.iter().map(|m| m.to_string().len()).sum::<usize>() > budget {
+        for m in messages.iter_mut() {
+            if m["role"] == "tool" {
+                if let Some(c) = m["content"].as_str().map(String::from) {
+                    m["content"] = json!(truncate(&c, 500));
+                }
+            }
+        }
+    }
 }

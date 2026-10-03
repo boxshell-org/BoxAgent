@@ -170,6 +170,8 @@
     <string name="auto_wakelock_desc">防止任务执行途中 CPU 休眠。</string>
     <string name="save">保存</string>
     <string name="test">测试</string>
+    <string name="compact_tools">精简工具描述</string>
+    <string name="compact_tools_desc">工具列表里只发一行简介而非完整描述——对不支持提示词缓存的供应商能显著缩小每次请求的体积。</string>
     <string name="safety">安全</string>
     <string name="confirm_policy">确认策略</string>
     <string name="policy_strict">严格</string>

@@ -139,8 +139,17 @@ class ToolRunner(
             "settings_put" -> shellExec("settings put ${a.getString("namespace")} ${a.getString("key")} ${a.getString("value")}")
             "file_read" -> runCatching {
                 val bytes = daemon.requireClient().fileRead(a.getString("path"))
-                ok().put("size", bytes.size)
-                    .put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                val asText = runCatching { String(bytes, Charsets.UTF_8) }
+                    .getOrNull()?.takeIf { it.isNotEmpty() && !it.contains('�') }
+                if (asText != null) {
+                    // Text is far cheaper (and readable) for the LLM than b64.
+                    ok().put("size", bytes.size)
+                        .put("text", asText.take(4000))
+                } else {
+                    ok().put("size", bytes.size)
+                        .put("mime", "application/octet-stream")
+                        .put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                }
             }.getOrElse { err(it) }
             "file_write" -> runCatching {
                 val bytes = daemon.requireClient().fileWrite(

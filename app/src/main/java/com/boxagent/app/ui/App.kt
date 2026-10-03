@@ -101,6 +101,12 @@ private fun MainShell(app: BoxAgentApp) {
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            } else if (agentState.usageText.isNotEmpty()) {
+                Text(
+                    agentState.usageText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             StatusDot(
                 on = daemonStatus.shell == ShellState.ONLINE,

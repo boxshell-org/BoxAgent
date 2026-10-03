@@ -40,15 +40,18 @@ class Settings(private val context: Context) {
         val KEY_ADB_PORT = intPreferencesKey("adb_port")
         val KEY_THEME = stringPreferencesKey("theme")
         val KEY_CUSTOM_PROVIDERS = stringPreferencesKey("custom_providers")
+        val KEY_COMPACT_TOOLS = booleanPreferencesKey("compact_tools")
 
         const val DEFAULT_SYSTEM_PROMPT =
             "You are BoxAgent, an operator running on the user's Android phone. " +
             "You act only through the provided tools. Read before you act: use " +
             "ui_tree to see the screen, screenshot when coordinates are unclear. " +
             "Prefer small verifiable steps. For destructive operations, explain " +
-            "what you are about to do first. Always respond in the same language " +
-            "the user writes in. When finished, call task_done with a concise " +
-            "summary."
+            "what you are about to do first. Reuse recent tool results instead " +
+            "of re-calling a tool when nothing changed; prefer ui_find over " +
+            "ui_tree and ui_tree over screenshot when possible. Always respond " +
+            "in the same language the user writes in. When finished, call " +
+            "task_done with a concise summary."
     }
 
     val baseUrl: Flow<String> = context.prefs.data.map { it[KEY_BASE_URL] ?: LlmProfile().baseUrl }
@@ -72,6 +75,9 @@ class Settings(private val context: Context) {
     val adbHost: Flow<String> = context.prefs.data.map { it[KEY_ADB_HOST] ?: "127.0.0.1" }
     val adbPort: Flow<Int> = context.prefs.data.map { it[KEY_ADB_PORT] ?: 0 }
     val theme: Flow<String> = context.prefs.data.map { it[KEY_THEME] ?: "system" }
+    /** Short tool schemas (summary instead of full description). */
+    val compactTools: Flow<Boolean> =
+        context.prefs.data.map { it[KEY_COMPACT_TOOLS] ?: true }
 
     /** User-saved provider presets (name/baseUrl/model) as a JSON array. */
     val customProviders: Flow<List<LlmProfile>> = context.prefs.data.map { p ->
@@ -138,4 +144,6 @@ class Settings(private val context: Context) {
         it[KEY_ADB_PORT] = port
     }
     suspend fun setTheme(v: String) = context.prefs.edit { it[KEY_THEME] = v }
+    suspend fun setCompactTools(v: Boolean) =
+        context.prefs.edit { it[KEY_COMPACT_TOOLS] = v }
 }

@@ -249,6 +249,15 @@ fun SettingsScreen(app: BoxAgentApp) {
                         Modifier.weight(1f))
                 }
                 SettingField(stringResource(R.string.system_prompt), sysPrompt, { sysPrompt = it }, lines = 4)
+                val compactTools by s.compactTools.collectAsState(initial = true)
+                ToggleRow(stringResource(R.string.compact_tools), compactTools) {
+                    scope.launch { s.setCompactTools(it) }
+                }
+                Text(
+                    stringResource(R.string.compact_tools_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton(stringResource(R.string.save), onClick = {
                         app.secrets.apiKey = apiKey

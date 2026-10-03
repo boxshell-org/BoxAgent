@@ -13,6 +13,15 @@ pub struct LlmConfig {
     pub model: String,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// Stable per-conversation key for provider-side prefix-cache routing
+    /// (OpenAI `prompt_cache_key`; ignored by servers that don't know it).
+    pub prompt_cache_key: String,
+    /// Optional `reasoning_effort` passthrough ("low"/"medium"/"high").
+    pub reasoning_effort: String,
+}
+
+fn is_anthropic_compat(cfg: &LlmConfig) -> bool {
+    cfg.base_url.contains("anthropic")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +36,8 @@ pub struct AssistantMsg {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
+    /// `usage` object from the final stream chunk (when requested).
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Error)]
@@ -59,14 +70,42 @@ where
         .build()
         .map_err(|e| LlmError::Network(e.to_string()))?;
 
-    let body = json!({
+    let mut body = json!({
         "model": cfg.model,
         "messages": messages,
         "tools": tools,
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "stream": true,
+        // Ask for usage in the last chunk (cached token counts included)
+        "stream_options": {"include_usage": true},
+        // Batching independent calls into one turn avoids whole-context resends
+        "parallel_tool_calls": true,
     });
+    if !cfg.prompt_cache_key.is_empty() {
+        body["prompt_cache_key"] = json!(cfg.prompt_cache_key);
+    }
+    if !cfg.reasoning_effort.is_empty() {
+        body["reasoning_effort"] = json!(cfg.reasoning_effort);
+    }
+    // Anthropic-style breakpoints: cache the static prefix (system prompt and
+    // the tool catalog) on endpoints that honor `cache_control`.
+    if is_anthropic_compat(cfg) {
+        for m in body["messages"].as_array_mut().into_iter().flatten() {
+            if m["role"] == "system" {
+                let text = m["content"].clone();
+                m["content"] = json!([{
+                    "type": "text", "text": text,
+                    "cache_control": {"type": "ephemeral"},
+                }]);
+            }
+        }
+        if let Some(ts) = body["tools"].as_array_mut() {
+            if let Some(last) = ts.last_mut() {
+                last["cache_control"] = json!({"type": "ephemeral"});
+            }
+        }
+    }
 
     let resp = client
         .post(endpoint(&cfg.base_url))
@@ -118,6 +157,11 @@ fn parse_delta<F: FnMut(&str)>(
 ) -> Result<(), LlmError> {
     let v: Value =
         serde_json::from_str(data).map_err(|e| LlmError::Stream(format!("{e}: {data}")))?;
+
+    // Final chunk may carry usage without choices.
+    if v["usage"].is_object() {
+        acc.usage = Some(v["usage"].clone());
+    }
     let Some(choice) = v["choices"].get(0) else {
         return Ok(());
     };

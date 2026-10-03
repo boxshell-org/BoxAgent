@@ -40,6 +40,9 @@ data class ChatMsg(
 
 data class PendingAsk(val question: String, val answer: CompletableDeferred<String>)
 
+private fun fmtK(n: Long): String =
+    if (n >= 1000) "%.1fk".format(java.util.Locale.US, n / 1000.0) else n.toString()
+
 data class AgentState(
     val running: Boolean = false,
     val conversationId: Long = 0,
@@ -48,6 +51,8 @@ data class AgentState(
     val pendingAsk: PendingAsk? = null,
     val steps: Int = 0,
     val error: String? = null,
+    /** Last request's token usage summary, e.g. "↑9.1k (cached 6.2k) ↓0.4k". */
+    val usageText: String = "",
 )
 
 /**
@@ -126,6 +131,10 @@ class AgentController(
             .put("history", history)
             .put("max_steps", settings.maxSteps.first())
             .put("max_wall_ms", settings.maxWallMs.first())
+            // Stable per-conversation key: providers route it to a warm
+            // prefix cache instead of recomputing the whole prompt.
+            .put("prompt_cache_key", "boxagent-c$convId")
+            .put("compact_tools", settings.compactTools.first())
 
         assistantBuf = StringBuilder()
         pendingToolCalls.clear()
@@ -153,8 +162,14 @@ class AgentController(
         val msgs = db.messages().forConversation(convId).first()
         val arr = JSONArray()
         msgs.filter { it.role == "user" || it.role == "assistant" }
-            .takeLast(24)
-            .forEach { arr.put(JSONObject().put("role", it.role).put("content", it.content)) }
+            .takeLast(16)
+            .forEach {
+                arr.put(
+                    JSONObject()
+                        .put("role", it.role)
+                        .put("content", it.content.take(1500)),
+                )
+            }
         return arr
     }
 
@@ -252,6 +267,19 @@ class AgentController(
                     flushAssistant()
                     _state.update { it.copy(running = false, error = msg) }
                     endRun(null, msg)
+                }
+                "usage" -> {
+                    val u = e.optJSONObject("usage") ?: return
+                    val inp = u.optLong("prompt_tokens")
+                    val outp = u.optLong("completion_tokens")
+                    val cached = u.optJSONObject("prompt_tokens_details")
+                        ?.optLong("cached_tokens") ?: 0
+                    _state.update {
+                        it.copy(
+                            usageText = "↑${fmtK(inp)} · ↓${fmtK(outp)}" +
+                                if (cached > 0) " · cache ${fmtK(cached)}" else "",
+                        )
+                    }
                 }
                 "warn" -> {
                     _state.update {

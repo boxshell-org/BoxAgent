@@ -382,13 +382,14 @@ pub fn all() -> Vec<Tool> {
 }
 
 impl Tool {
-    /// OpenAI `tools[]` entry.
-    pub fn openai_schema(&self) -> Value {
+    /// OpenAI `tools[]` entry. `compact` swaps the long description for the
+    /// one-line summary — parameter descriptions always stay.
+    pub fn openai_schema(&self, compact: bool) -> Value {
         json!({
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": if compact { self.summary } else { self.description },
                 "parameters": self.parameters,
             }
         })
@@ -407,8 +408,8 @@ impl Tool {
     }
 }
 
-pub fn openai_tools() -> Value {
-    json!(all().iter().map(|t| t.openai_schema()).collect::<Vec<_>>())
+pub fn openai_tools(compact: bool) -> Value {
+    json!(all().iter().map(|t| t.openai_schema(compact)).collect::<Vec<_>>())
 }
 
 pub fn catalog() -> Value {
@@ -432,7 +433,13 @@ mod tests {
             assert_eq!(t.parameters["type"], "object");
             assert!(t.description.len() > 20, "{}: {:?}", t.name, t.description);
         }
-        let v = openai_tools();
+        let v = openai_tools(false);
         assert!(v.is_array());
+        let compact = openai_tools(true);
+        assert!(
+            compact.to_string().len() < v.to_string().len() * 9 / 10,
+            "compact schemas should be measurably smaller"
+        );
     }
 }
+

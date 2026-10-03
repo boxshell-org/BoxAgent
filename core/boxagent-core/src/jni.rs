@@ -188,6 +188,8 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativePingLlm(
             model: v["model"].as_str().unwrap_or("").into(),
             temperature: v["temperature"].as_f64().unwrap_or(0.2),
             max_tokens: v["max_tokens"].as_u64().unwrap_or(2048) as u32,
+            prompt_cache_key: String::new(),
+            reasoning_effort: String::new(),
         };
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -346,12 +348,15 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
             model: v["model"].as_str().unwrap_or_default().into(),
             temperature: v["temperature"].as_f64().unwrap_or(0.2),
             max_tokens: v["max_tokens"].as_u64().unwrap_or(4096) as u32,
+            prompt_cache_key: v["prompt_cache_key"].as_str().unwrap_or_default().into(),
+            reasoning_effort: v["reasoning_effort"].as_str().unwrap_or_default().into(),
         },
         system_prompt: v["system_prompt"].as_str().unwrap_or_default().into(),
         prompt: v["prompt"].as_str().unwrap_or_default().into(),
         history: v["history"].as_array().cloned().unwrap_or_default(),
         max_steps: v["max_steps"].as_u64().unwrap_or(40) as u32,
         max_wall_ms: v["max_wall_ms"].as_u64().unwrap_or(600_000),
+        compact_tools: v["compact_tools"].as_bool().unwrap_or(true),
     };
 
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
