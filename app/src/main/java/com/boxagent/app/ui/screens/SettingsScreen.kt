@@ -2,18 +2,17 @@ package com.boxagent.app.ui.screens
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -41,7 +40,6 @@ import com.boxagent.app.llm.ModelFetcher
 import com.boxagent.app.llm.ModelsDev
 import com.boxagent.app.llm.CatalogModel
 import com.boxagent.app.llm.CatalogProvider
-import com.boxagent.app.ui.Hairline
 import com.boxagent.app.ui.components.BwCard
 import com.boxagent.app.ui.components.BwSwitch
 import com.boxagent.app.ui.components.PillButton
@@ -80,11 +78,29 @@ fun SettingsScreen(app: BoxAgentApp) {
     var sysPrompt by remember(systemPrompt) { mutableStateOf(systemPrompt) }
     var stepsStr by remember(maxSteps) { mutableStateOf(maxSteps.toString()) }
     var testResult by remember { mutableStateOf<String?>(null) }
+
+    // Draft persistence: edits must not die with the composable. The key is
+    // written through on every change; the rest of the LLM draft commits
+    // when the screen leaves composition (same as pressing Save).
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose {
+            val u = url
+            val m = mdl
+            val t = tempStr.toDoubleOrNull() ?: 0.2
+            val tok = tokStr.toIntOrNull() ?: 4096
+            val prompt = sysPrompt.ifEmpty { Settings.DEFAULT_SYSTEM_PROMPT }
+            kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+                s.setLlm(u, m, t, tok)
+                s.setSystemPrompt(prompt)
+            }
+        }
+    }
     var showPresetDialog by remember { mutableStateOf(false) }
     var models by remember { mutableStateOf<List<String>>(emptyList()) }
     var modelsLoading by remember { mutableStateOf(false) }
     var modelsErr by remember { mutableStateOf<String?>(null) }
-    var modelsExpanded by remember { mutableStateOf(false) }
+    var showModelDialog by remember { mutableStateOf(false) }
+    var refreshTick by remember { mutableStateOf(0) }
     var modelInfo by remember { mutableStateOf<Map<String, CatalogModel>>(emptyMap()) }
     var showCatalog by remember { mutableStateOf(false) }
     var showGuide by remember { mutableStateOf(false) }
@@ -94,7 +110,7 @@ fun SettingsScreen(app: BoxAgentApp) {
 
     // Auto-fetch the model list whenever the endpoint or key changes; fall
     // back to the models.dev catalog when the endpoint has no /models.
-    androidx.compose.runtime.LaunchedEffect(url, apiKey) {
+    androidx.compose.runtime.LaunchedEffect(url, apiKey, refreshTick) {
         modelsErr = null
         if (url.isBlank()) {
             models = emptyList(); modelInfo = emptyMap()
@@ -186,7 +202,13 @@ fun SettingsScreen(app: BoxAgentApp) {
                         }
                     }
                 }
-                SettingField(stringResource(R.string.api_key), apiKey, { apiKey = it }, secret = true)
+                SettingField(stringResource(R.string.api_key), apiKey, {
+                    apiKey = it
+                    // Write-through: the agent reads secrets.apiKey when a
+                    // run starts, so the key must survive a tab switch even
+                    // without an explicit Save.
+                    app.secrets.apiKey = it
+                }, secret = true)
                 SettingField(stringResource(R.string.base_url), url, { url = it })
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -194,49 +216,16 @@ fun SettingsScreen(app: BoxAgentApp) {
                 ) {
                     SettingField(stringResource(R.string.model), mdl, { mdl = it },
                         Modifier.weight(1f))
-                    Box {
-                        PillButton(
-                            if (modelsLoading) "…" else stringResource(R.string.models),
-                            filled = false,
-                            onClick = { modelsExpanded = true },
-                        )
-                        DropdownMenu(
-                            expanded = modelsExpanded,
-                            onDismissRequest = { modelsExpanded = false },
-                        ) {
-                            if (models.isEmpty()) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            stringResource(
-                                                if (modelsErr != null) R.string.models_error
-                                                else R.string.models_empty
-                                            ),
-                                        )
-                                    },
-                                    onClick = { modelsExpanded = false },
-                                )
-                            }
-                            models.forEach { m ->
-                                val info = modelInfo[m]
-                                DropdownMenuItem(
-                                    text = {
-                                        Column {
-                                            Text(m)
-                                            if (info != null) {
-                                                Text(
-                                                    modelMeta(info),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                )
-                                            }
-                                        }
-                                    },
-                                    onClick = { mdl = m; modelsExpanded = false },
-                                )
-                            }
-                        }
-                    }
+                    PillButton(
+                        when {
+                            modelsLoading -> "…"
+                            models.isNotEmpty() ->
+                                stringResource(R.string.models_count, models.size) + " ▾"
+                            else -> stringResource(R.string.models)
+                        },
+                        filled = false,
+                        onClick = { showModelDialog = true },
+                    )
                 }
                 modelsErr?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall,
@@ -417,8 +406,21 @@ fun SettingsScreen(app: BoxAgentApp) {
             onDismiss = { showCatalog = false },
         )
     }
+
+    if (showModelDialog) {
+        ModelPickerDialog(
+            models = models,
+            info = modelInfo,
+            loading = modelsLoading,
+            error = modelsErr,
+            onPick = { mdl = it; showModelDialog = false },
+            onRetry = { refreshTick++ },
+            onDismiss = { showModelDialog = false },
+        )
+    }
 }
 
+@Composable
 private fun modelMeta(m: CatalogModel): String = buildString {
     if (m.name.isNotBlank() && m.name != m.id) append(m.name)
     if (m.context > 0) {
@@ -428,6 +430,14 @@ private fun modelMeta(m: CatalogModel): String = buildString {
             else if (m.context >= 1_000) "${m.context / 1_000}k ctx"
             else "${m.context} ctx"
         )
+    }
+    if (m.toolCall) {
+        if (isNotEmpty()) append(" · ")
+        append(stringResource(R.string.cap_tools))
+    }
+    if (m.reasoning) {
+        if (isNotEmpty()) append(" · ")
+        append(stringResource(R.string.cap_reasoning))
     }
 }
 
@@ -499,6 +509,108 @@ private fun PresetDialog(onSave: (String) -> Unit, onDismiss: () -> Unit) {
     )
 }
 
+/**
+ * Search rank for one query term against candidate fields:
+ * 0 exact, 1 prefix, 2 substring, MAX_VALUE no match. Ranked results put
+ * the obvious hit ("openai" -> OpenAI) above incidental substring matches.
+ */
+private fun matchScore(q: String, vararg fields: String): Int {
+    var best = Int.MAX_VALUE
+    for (f in fields) {
+        val l = f.lowercase()
+        best = minOf(best, when {
+            l == q -> 0
+            l.startsWith(q) -> 1
+            l.contains(q) -> 2
+            else -> Int.MAX_VALUE
+        })
+    }
+    return best
+}
+
+@Composable
+private fun ModelPickerDialog(
+    models: List<String>,
+    info: Map<String, CatalogModel>,
+    loading: Boolean,
+    error: String?,
+    onPick: (String) -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var q by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(stringResource(R.string.choose_model),
+                style = MaterialTheme.typography.titleMedium)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingField(stringResource(R.string.search), q, { q = it })
+                when {
+                    loading && models.isEmpty() -> Text(
+                        "…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    models.isEmpty() && error != null -> {
+                        Text(
+                            stringResource(R.string.models_error) + ": " + error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        PillButton(stringResource(R.string.retry),
+                            filled = false, onClick = onRetry)
+                    }
+                    else -> {
+                        val list = remember(models, info, q) {
+                            val f = q.trim().lowercase()
+                            if (f.isEmpty()) models
+                            else models.mapNotNull { id ->
+                                val s = matchScore(f, id, info[id]?.name.orEmpty())
+                                if (s == Int.MAX_VALUE) null else id to s
+                            }.sortedWith(compareBy({ it.second }, { it.first }))
+                                .map { it.first }
+                        }
+                        LazyColumn(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 380.dp),
+                        ) {
+                            if (list.isEmpty()) {
+                                item {
+                                    Text(stringResource(R.string.models_empty),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            items(list) { id ->
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onPick(id) }
+                                        .padding(vertical = 8.dp),
+                                ) {
+                                    Text(id, style = MaterialTheme.typography.titleMedium)
+                                    info[id]?.let {
+                                        Text(modelMeta(it),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss)
+        },
+    )
+}
+
 @Composable
 private fun ProviderDialog(
     providers: List<CatalogProvider>?,
@@ -517,25 +629,38 @@ private fun ProviderDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SettingField(stringResource(R.string.search), q, { q = it })
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 380.dp)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    when {
-                        providers != null -> {
+                when {
+                    providers != null -> {
+                        val list = remember(providers, q) {
                             val f = q.trim().lowercase()
-                            val list = providers.filter {
-                                f.isEmpty() || it.name.lowercase().contains(f) ||
-                                    it.id.lowercase().contains(f)
-                            }
+                            if (f.isEmpty()) providers
+                            else providers.mapNotNull { p ->
+                                val s = matchScore(f, p.id, p.name, hostOf(p.api))
+                                val rank = when {
+                                    s != Int.MAX_VALUE -> s
+                                    // Searching a model id (e.g. "gpt-4o")
+                                    // surfaces the provider carrying it.
+                                    p.models.any { it.id.lowercase().contains(f) } -> 3
+                                    else -> return@mapNotNull null
+                                }
+                                p to rank
+                            }.sortedWith(compareBy({ it.second },
+                                { it.first.name.lowercase() }))
+                                .map { it.first }
+                        }
+                        LazyColumn(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 380.dp),
+                        ) {
                             if (list.isEmpty()) {
-                                Text(stringResource(R.string.models_empty),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                item {
+                                    Text(stringResource(R.string.models_empty),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
-                            list.forEach { p ->
+                            items(list, key = { it.id }) { p ->
                                 Column(
                                     Modifier
                                         .fillMaxWidth()
@@ -553,21 +678,21 @@ private fun ProviderDialog(
                                 }
                             }
                         }
-                        error != null -> {
-                            Text(
-                                stringResource(R.string.models_error) + ": " + error,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            PillButton(stringResource(R.string.retry),
-                                filled = false, onClick = onRetry)
-                        }
-                        else -> Text(
-                            "…",
+                    }
+                    error != null -> {
+                        Text(
+                            stringResource(R.string.models_error) + ": " + error,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        PillButton(stringResource(R.string.retry),
+                            filled = false, onClick = onRetry)
                     }
+                    else -> Text(
+                        "…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         },

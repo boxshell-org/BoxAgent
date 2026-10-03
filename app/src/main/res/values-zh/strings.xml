@@ -123,9 +123,12 @@
     <string name="models_error">拉取失败</string>
     <string name="browse_providers">供应商 ▾</string>
     <string name="choose_provider">选择供应商</string>
+    <string name="choose_model">选择模型</string>
     <string name="search">搜索</string>
     <string name="retry">重试</string>
     <string name="models_count">%1$d 个模型</string>
+    <string name="cap_tools">工具</string>
+    <string name="cap_reasoning">推理</string>
     <string name="save_preset">保存预设</string>
     <string name="preset_label">预设</string>
     <string name="preset_name">预设名称</string>
