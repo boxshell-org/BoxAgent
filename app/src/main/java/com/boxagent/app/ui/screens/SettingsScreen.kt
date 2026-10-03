@@ -87,6 +87,7 @@ fun SettingsScreen(app: BoxAgentApp) {
     var modelsExpanded by remember { mutableStateOf(false) }
     var modelInfo by remember { mutableStateOf<Map<String, CatalogModel>>(emptyMap()) }
     var showCatalog by remember { mutableStateOf(false) }
+    var showGuide by remember { mutableStateOf(false) }
     var catalogProviders by remember { mutableStateOf<List<CatalogProvider>?>(null) }
     var catalogErr by remember { mutableStateOf<String?>(null) }
     val customs by s.customProviders.collectAsState(initial = emptyList())
@@ -118,6 +119,11 @@ fun SettingsScreen(app: BoxAgentApp) {
                 }
             }
         modelsLoading = false
+    }
+
+    if (showGuide) {
+        PermissionsGuideScreen(app, onBack = { showGuide = false })
+        return
     }
 
     Column(
@@ -358,9 +364,14 @@ fun SettingsScreen(app: BoxAgentApp) {
         }
 
         SectionLabel(stringResource(R.string.onboarding))
-        PillButton(stringResource(R.string.redo_setup), filled = false, onClick = {
-            scope.launch { s.setOnboarded(false) }
-        })
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PillButton(stringResource(R.string.redo_setup), filled = false, onClick = {
+                scope.launch { s.setOnboarded(false) }
+            })
+            PillButton(stringResource(R.string.guide_title), filled = false, onClick = {
+                showGuide = true
+            })
+        }
     }
 
     if (showPresetDialog) {

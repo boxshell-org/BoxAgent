@@ -133,6 +133,45 @@
     <string name="save_preset">Save preset</string>
     <string name="preset_label">preset</string>
     <string name="preset_name">Preset name</string>
+    <!-- permission guide -->
+    <string name="guide_title">Permissions</string>
+    <string name="guide_intro">BoxAgent works through a small set of capabilities. A filled dot means granted — open a missing one to see how to fix it.</string>
+    <string name="guide_required">Set up by you</string>
+    <string name="guide_auto">Granted at install</string>
+    <string name="perm_granted">Granted</string>
+    <string name="perm_missing">Not granted</string>
+    <string name="back">‹ Back</string>
+    <string name="grant">Grant</string>
+    <string name="open_dev_settings">Developer settings</string>
+
+    <string name="perm_notif">Notifications</string>
+    <string name="perm_notif_desc">Shows agent progress and keeps the foreground service alive.</string>
+    <string name="perm_notif_steps">Tap Grant and allow notifications. If you denied it before, enable them under Settings → Notifications → BoxAgent.</string>
+
+    <string name="perm_adb">Wireless debugging</string>
+    <string name="perm_adb_desc">Gives BoxAgent an ADB shell (uid 2000) for system-level operations like installs, settings and package control.</string>
+    <string name="perm_adb_steps">1. Settings → About phone → tap Build number 7 times to unlock Developer options.\n2. Settings → System → Developer options → turn on Wireless debugging.\n3. Tap “Pair device with pairing code” — note the IP, port and 6-digit code.\n4. Come back and tap Pair, then Connect &amp; spawn.</string>
+
+    <string name="perm_a11y">Accessibility service</string>
+    <string name="perm_a11y_desc">Reads the screen and performs taps, typing, swipes and scrolls on your behalf.</string>
+    <string name="perm_a11y_steps">Open Accessibility settings, find BoxAgent under Downloaded services, switch it on and confirm the system prompt.</string>
+
+    <string name="perm_battery">Battery exemption</string>
+    <string name="perm_battery_desc">Stops the system from freezing the daemon and agent between tasks.</string>
+    <string name="perm_battery_steps">Tap Exempt and choose Allow. On some OEMs also set BoxAgent to “No restrictions” under Settings → Battery → Background usage.</string>
+
+    <string name="auto_net">Internet &amp; network state</string>
+    <string name="auto_net_desc">Calls your LLM API and talks to the local daemon over Wi-Fi.</string>
+    <string name="auto_multicast">Wi-Fi multicast</string>
+    <string name="auto_multicast_desc">Discovers wireless-debugging endpoints on your LAN via mDNS.</string>
+    <string name="auto_packages">Query all apps</string>
+    <string name="auto_packages_desc">launch_app resolves human app names to package ids.</string>
+    <string name="auto_fgs">Foreground service</string>
+    <string name="auto_fgs_desc">Keeps the agent runtime, tool executor and daemon watchdog alive.</string>
+    <string name="auto_boot">Run at boot</string>
+    <string name="auto_boot_desc">Restarts the watchdog after a reboot.</string>
+    <string name="auto_wakelock">Wake lock</string>
+    <string name="auto_wakelock_desc">Prevents the CPU from sleeping mid-task.</string>
     <string name="save">Save</string>
     <string name="test">Test</string>
     <string name="safety">Safety</string>

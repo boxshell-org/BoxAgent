@@ -129,6 +129,45 @@
     <string name="save_preset">保存预设</string>
     <string name="preset_label">预设</string>
     <string name="preset_name">预设名称</string>
+    <!-- permission guide -->
+    <string name="guide_title">权限</string>
+    <string name="guide_intro">BoxAgent 依靠一小组系统能力工作。实心点表示已授权——点开未授权项可查看如何开通。</string>
+    <string name="guide_required">需要手动开启</string>
+    <string name="guide_auto">安装时授予</string>
+    <string name="perm_granted">已授权</string>
+    <string name="perm_missing">未授权</string>
+    <string name="back">‹ 返回</string>
+    <string name="grant">去授权</string>
+    <string name="open_dev_settings">开发者选项</string>
+
+    <string name="perm_notif">通知</string>
+    <string name="perm_notif_desc">显示 agent 任务进度，并保证前台服务不被系统回收。</string>
+    <string name="perm_notif_steps">点「去授权」并允许通知。若之前拒绝过，请到 设置 → 通知 → BoxAgent 手动开启。</string>
+
+    <string name="perm_adb">无线调试</string>
+    <string name="perm_adb_desc">为 BoxAgent 提供 ADB shell（uid 2000），用于安装、改设置、包管理等系统级操作。</string>
+    <string name="perm_adb_steps">1. 设置 → 关于手机 → 连点 7 次「版本号」解锁开发者选项。\n2. 设置 → 系统 → 开发者选项 → 打开「无线调试」。\n3. 点「使用配对码配对设备」，记下 IP、端口和 6 位配对码。\n4. 回到这里点「配对」，再点「连接并启动」。</string>
+
+    <string name="perm_a11y">无障碍服务</string>
+    <string name="perm_a11y_desc">读取屏幕内容，代替你执行点击、输入、滑动和滚动。</string>
+    <string name="perm_a11y_steps">打开无障碍设置，在「已下载的服务」里找到 BoxAgent，开启开关并确认系统提示。</string>
+
+    <string name="perm_battery">电池豁免</string>
+    <string name="perm_battery_desc">防止系统在任务间隙冻结守护进程和 agent。</string>
+    <string name="perm_battery_steps">点「豁免」并选允许。部分国产 ROM 还需到 设置 → 电池 → 后台耗电管理 把 BoxAgent 设为「不限制」。</string>
+
+    <string name="auto_net">网络与网络状态</string>
+    <string name="auto_net_desc">调用你的 LLM API，并通过 Wi-Fi 与本地守护进程通信。</string>
+    <string name="auto_multicast">Wi-Fi 组播</string>
+    <string name="auto_multicast_desc">通过 mDNS 发现局域网内的无线调试端点。</string>
+    <string name="auto_packages">查询全部应用</string>
+    <string name="auto_packages_desc">launch_app 用它把应用名解析成包名。</string>
+    <string name="auto_fgs">前台服务</string>
+    <string name="auto_fgs_desc">保持 agent 运行时、工具执行器和守护进程看门狗存活。</string>
+    <string name="auto_boot">开机自启</string>
+    <string name="auto_boot_desc">重启后自动拉起看门狗。</string>
+    <string name="auto_wakelock">唤醒锁</string>
+    <string name="auto_wakelock_desc">防止任务执行途中 CPU 休眠。</string>
     <string name="save">保存</string>
     <string name="test">测试</string>
     <string name="safety">安全</string>

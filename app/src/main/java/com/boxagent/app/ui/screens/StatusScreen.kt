@@ -46,7 +46,13 @@ fun StatusScreen(app: BoxAgentApp) {
     val ctx = LocalContext.current
     var showPair by remember { mutableStateOf(false) }
     var showConnect by remember { mutableStateOf(false) }
+    var showGuide by remember { mutableStateOf(false) }
     var probe by remember { mutableStateOf<String?>(null) }
+
+    if (showGuide) {
+        PermissionsGuideScreen(app, onBack = { showGuide = false })
+        return
+    }
 
     Column(
         Modifier
@@ -82,6 +88,7 @@ fun StatusScreen(app: BoxAgentApp) {
             })
             PillButton(stringResource(R.string.re_pair), filled = false, onClick = { showPair = true })
             PillButton(stringResource(R.string.connect), filled = false, onClick = { showConnect = true })
+            PillButton(stringResource(R.string.guide_title), filled = false, onClick = { showGuide = true })
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PillButton(stringResource(R.string.enable_a11y), filled = false, onClick = {
