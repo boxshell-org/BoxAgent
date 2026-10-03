@@ -36,8 +36,9 @@ jobs:
           java-version: "17"
       - name: Install Android SDK components
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-35" "build-tools;34.0.0" "ndk;27.0.12077973"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null
+          "$SDKM" "platforms;android-35" "build-tools;34.0.0" "ndk;27.0.12077973"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android, x86_64-linux-android
