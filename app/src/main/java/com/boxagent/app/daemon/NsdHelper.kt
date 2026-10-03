@@ -28,9 +28,6 @@ class NsdHelper(context: Context) {
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) {}
             override fun onDiscoveryStopped(serviceType: String) {}
-            override fun onDiscoveryFailed(serviceType: String, errorCode: Int) {
-                trySend(AdbEndpoint("", -1, "discovery_failed:$errorCode"))
-            }
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 nsd.resolveService(serviceInfo, object : NsdManager.ResolveListener {
@@ -41,9 +38,9 @@ class NsdHelper(context: Context) {
                     }
                 })
             }
-            @Deprecated("deprecated in API")
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {}
-            @Deprecated("deprecated in API")
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                trySend(AdbEndpoint("", -1, "discovery_failed:$errorCode"))
+            }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
         }
         nsd.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)

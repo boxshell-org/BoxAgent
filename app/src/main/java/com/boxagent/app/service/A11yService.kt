@@ -247,7 +247,7 @@ class A11yService : AccessibilityService() {
 
     suspend fun longPress(x: Float?, y: Float?, text: String?, desc: String?, durationMs: Long): Boolean {
         val (cx, cy) = if (x != null && y != null) x to y
-            else nodeCenter(text to desc to null) ?: return false
+            else nodeCenter(Triple(text, desc, null)) ?: return false
         val path = Path().apply { moveTo(cx, cy) }
         return gesture(path, durationMs)
     }

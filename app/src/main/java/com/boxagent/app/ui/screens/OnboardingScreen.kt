@@ -89,15 +89,19 @@ fun OnboardingScreen(app: BoxAgentApp) {
                         Field("Pairing code", pairCode) { pairCode = it }
                     },
                     action = {
-                        PillButton(if (busy) "Pairing…" else "Pair", enabled = !busy && pairPort.isNotEmpty() && pairCode.isNotEmpty()) {
-                            busy = true
-                            scope.launch {
-                                app.daemon.pair(host, pairPort.toIntOrNull() ?: 0, pairCode)
-                                    .onSuccess { note = "paired: $it" }
-                                    .onFailure { note = it.message }
-                                busy = false
-                            }
-                        }
+                        PillButton(
+                            if (busy) "Pairing…" else "Pair",
+                            enabled = !busy && pairPort.isNotEmpty() && pairCode.isNotEmpty(),
+                            onClick = {
+                                busy = true
+                                scope.launch {
+                                    app.daemon.pair(host, pairPort.toIntOrNull() ?: 0, pairCode)
+                                        .onSuccess { note = "paired: $it" }
+                                        .onFailure { note = it.message }
+                                    busy = false
+                                }
+                            },
+                        )
                     },
                 )
                 1 -> StepPage(
@@ -116,14 +120,18 @@ fun OnboardingScreen(app: BoxAgentApp) {
                         Field("Connect port", connectPort) { connectPort = it }
                     },
                     action = {
-                        PillButton(if (busy) "Connecting…" else "Connect & spawn", enabled = !busy && connectPort.isNotEmpty()) {
-                            busy = true
-                            scope.launch {
-                                app.daemon.connectAndSpawn(host, connectPort.toIntOrNull() ?: 0)
-                                    .onFailure { note = it.message }
-                                busy = false
-                            }
-                        }
+                        PillButton(
+                            if (busy) "Connecting…" else "Connect & spawn",
+                            enabled = !busy && connectPort.isNotEmpty(),
+                            onClick = {
+                                busy = true
+                                scope.launch {
+                                    app.daemon.connectAndSpawn(host, connectPort.toIntOrNull() ?: 0)
+                                        .onFailure { note = it.message }
+                                    busy = false
+                                }
+                            },
+                        )
                     },
                 )
                 else -> StepPage(
@@ -135,27 +143,31 @@ fun OnboardingScreen(app: BoxAgentApp) {
                     status = { StatusPill("a11y", a11yOn) },
                     content = {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PillButton("Enable a11y", filled = false) {
+                            PillButton("Enable a11y", filled = false, onClick = {
                                 ctx.startActivity(
                                     Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
                                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                                 )
-                            }
-                            PillButton("Battery", filled = false) {
+                            })
+                            PillButton("Battery", filled = false, onClick = {
                                 ctx.startActivity(
                                     Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                                         .setData(Uri.parse("package:${ctx.packageName}"))
                                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                                 )
-                            }
+                            })
                         }
                     },
                     action = {
-                        PillButton("Finish", enabled = st.shell == ShellState.ONLINE) {
-                            scope.launch {
-                                app.settings.setOnboarded(true)
-                            }
-                        }
+                        PillButton(
+                            "Finish",
+                            enabled = st.shell == ShellState.ONLINE,
+                            onClick = {
+                                scope.launch {
+                                    app.settings.setOnboarded(true)
+                                }
+                            },
+                        )
                     },
                 )
             }
@@ -176,9 +188,9 @@ fun OnboardingScreen(app: BoxAgentApp) {
                 .padding(top = 12.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            PillButton("Skip for now", filled = false) {
+            PillButton("Skip for now", filled = false, onClick = {
                 scope.launch { app.settings.setOnboarded(true) }
-            }
+            })
             Text(
                 "${pager.currentPage + 1} / 3",
                 style = MaterialTheme.typography.labelMedium,
