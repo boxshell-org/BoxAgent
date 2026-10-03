@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -37,6 +38,9 @@ import com.boxagent.app.data.ConfirmPolicy
 import com.boxagent.app.data.LlmProfile
 import com.boxagent.app.data.Settings
 import com.boxagent.app.llm.ModelFetcher
+import com.boxagent.app.llm.ModelsDev
+import com.boxagent.app.llm.CatalogModel
+import com.boxagent.app.llm.CatalogProvider
 import com.boxagent.app.ui.Hairline
 import com.boxagent.app.ui.components.BwCard
 import com.boxagent.app.ui.components.PillButton
@@ -50,13 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-private val PRESETS = listOf(
-    Triple("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
-    Triple("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
-    Triple("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
-    Triple("Moonshot", "https://api.moonshot.ai/v1", "kimi-k2-0905-preview"),
-    Triple("Local", "http://127.0.0.1:8080/v1", "local-model"),
-)
+private const val LOCAL_URL = "http://127.0.0.1:8080/v1"
 
 @Composable
 fun SettingsScreen(app: BoxAgentApp) {
@@ -86,18 +84,37 @@ fun SettingsScreen(app: BoxAgentApp) {
     var modelsLoading by remember { mutableStateOf(false) }
     var modelsErr by remember { mutableStateOf<String?>(null) }
     var modelsExpanded by remember { mutableStateOf(false) }
+    var modelInfo by remember { mutableStateOf<Map<String, CatalogModel>>(emptyMap()) }
+    var showCatalog by remember { mutableStateOf(false) }
+    var catalogProviders by remember { mutableStateOf<List<CatalogProvider>?>(null) }
+    var catalogErr by remember { mutableStateOf<String?>(null) }
     val customs by s.customProviders.collectAsState(initial = emptyList())
 
-    // Auto-fetch the model list whenever the endpoint or key changes.
+    // Auto-fetch the model list whenever the endpoint or key changes; fall
+    // back to the models.dev catalog when the endpoint has no /models.
     androidx.compose.runtime.LaunchedEffect(url, apiKey) {
-        models = emptyList(); modelsErr = null
-        if (url.isBlank()) return@LaunchedEffect
+        modelsErr = null
+        if (url.isBlank()) {
+            models = emptyList(); modelInfo = emptyMap()
+            return@LaunchedEffect
+        }
         kotlinx.coroutines.delay(800) // debounce typing
         modelsLoading = true
-        models = runCatching { ModelFetcher.list(url, apiKey) }
-            .getOrElse {
-                modelsErr = it.message
-                emptyList()
+        runCatching { ModelFetcher.list(url, apiKey) }
+            .onSuccess {
+                models = it
+                modelInfo = ModelsDev.peekProviderForUrl(url)
+                    ?.models?.associateBy { m -> m.id } ?: emptyMap()
+            }
+            .onFailure { e ->
+                val cp = runCatching { ModelsDev.providerForUrl(app, url) }.getOrNull()
+                if (cp != null) {
+                    models = cp.models.map { it.id }
+                    modelInfo = cp.models.associateBy { it.id }
+                } else {
+                    modelsErr = e.message
+                    modelInfo = emptyMap()
+                }
             }
         modelsLoading = false
     }
@@ -113,20 +130,26 @@ fun SettingsScreen(app: BoxAgentApp) {
         BwCard(Modifier.fillMaxWidth()) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PRESETS.take(3).forEach { (name, u, m) ->
-                        PillButton(name, filled = false, onClick = {
-                            url = u; mdl = m
-                            scope.launch { s.setLlm(u, m, tempStr.toDoubleOrNull() ?: 0.2, tokStr.toIntOrNull() ?: 4096) }
+                    PillButton(stringResource(R.string.browse_providers),
+                        filled = false, onClick = {
+                            showCatalog = true
+                            if (catalogProviders == null) {
+                                scope.launch {
+                                    catalogErr = null
+                                    runCatching { ModelsDev.catalog(app) }
+                                        .onSuccess { catalogProviders = it }
+                                        .onFailure { catalogErr = it.message }
+                                }
+                            }
                         })
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PRESETS.drop(3).forEach { (name, u, m) ->
-                        PillButton(name, filled = false, onClick = {
-                            url = u; mdl = m
-                            scope.launch { s.setLlm(u, m, tempStr.toDoubleOrNull() ?: 0.2, tokStr.toIntOrNull() ?: 4096) }
-                        })
-                    }
+                    PillButton("Local", filled = false, onClick = {
+                        url = LOCAL_URL; mdl = "local-model"
+                        scope.launch {
+                            s.setLlm(LOCAL_URL, "local-model",
+                                tempStr.toDoubleOrNull() ?: 0.2,
+                                tokStr.toIntOrNull() ?: 4096)
+                        }
+                    })
                     PillButton("+ " + stringResource(R.string.preset_label),
                         filled = false, onClick = { showPresetDialog = true })
                 }
@@ -188,8 +211,20 @@ fun SettingsScreen(app: BoxAgentApp) {
                                 )
                             }
                             models.forEach { m ->
+                                val info = modelInfo[m]
                                 DropdownMenuItem(
-                                    text = { Text(m) },
+                                    text = {
+                                        Column {
+                                            Text(m)
+                                            if (info != null) {
+                                                Text(
+                                                    modelMeta(info),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
+                                    },
                                     onClick = { mdl = m; modelsExpanded = false },
                                 )
                             }
@@ -338,7 +373,45 @@ fun SettingsScreen(app: BoxAgentApp) {
             onDismiss = { showPresetDialog = false },
         )
     }
+
+    if (showCatalog) {
+        ProviderDialog(
+            providers = catalogProviders,
+            error = catalogErr,
+            onPick = { p ->
+                url = p.api
+                models = p.models.map { it.id }
+                modelInfo = p.models.associateBy { it.id }
+                modelsErr = null
+                showCatalog = false
+            },
+            onRetry = {
+                scope.launch {
+                    catalogErr = null
+                    runCatching { ModelsDev.catalog(app) }
+                        .onSuccess { catalogProviders = it }
+                        .onFailure { catalogErr = it.message }
+                }
+            },
+            onDismiss = { showCatalog = false },
+        )
+    }
 }
+
+private fun modelMeta(m: CatalogModel): String = buildString {
+    if (m.name.isNotBlank() && m.name != m.id) append(m.name)
+    if (m.context > 0) {
+        if (isNotEmpty()) append(" · ")
+        append(
+            if (m.context >= 1_000_000) "${m.context / 1_000_000}M ctx"
+            else if (m.context >= 1_000) "${m.context / 1_000}k ctx"
+            else "${m.context} ctx"
+        )
+    }
+}
+
+private fun hostOf(api: String): String =
+    runCatching { java.net.URI(api).host }.getOrNull() ?: api
 
 @Composable
 private fun SettingField(
@@ -412,6 +485,84 @@ private fun PresetDialog(onSave: (String) -> Unit, onDismiss: () -> Unit) {
                 enabled = name.isNotBlank())
         },
         dismissButton = {
+            PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss)
+        },
+    )
+}
+
+@Composable
+private fun ProviderDialog(
+    providers: List<CatalogProvider>?,
+    error: String?,
+    onPick: (CatalogProvider) -> Unit,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var q by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(stringResource(R.string.choose_provider),
+                style = MaterialTheme.typography.titleMedium)
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingField(stringResource(R.string.search), q, { q = it })
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    when {
+                        providers != null -> {
+                            val f = q.trim().lowercase()
+                            val list = providers.filter {
+                                f.isEmpty() || it.name.lowercase().contains(f) ||
+                                    it.id.lowercase().contains(f)
+                            }
+                            if (list.isEmpty()) {
+                                Text(stringResource(R.string.models_empty),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            list.forEach { p ->
+                                Column(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onPick(p) }
+                                        .padding(vertical = 8.dp),
+                                ) {
+                                    Text(p.name,
+                                        style = MaterialTheme.typography.titleMedium)
+                                    Text(
+                                        stringResource(R.string.models_count, p.models.size) +
+                                            " · " + hostOf(p.api),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                        error != null -> {
+                            Text(
+                                stringResource(R.string.models_error) + ": " + error,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            PillButton(stringResource(R.string.retry),
+                                filled = false, onClick = onRetry)
+                        }
+                        else -> Text(
+                            "…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
             PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss)
         },
     )
