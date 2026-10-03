@@ -1,0 +1,23 @@
+[package]
+name = "boxagent-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "boxagent"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+boxagent-proto = { path = "../boxagent-proto" }
+adb-tls = { path = "../adb-tls" }
+adb_client = { version = "3.2.3", default-features = false }
+jni = "0.21"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset"] }
+tracing = { workspace = true }
+base64 = { workspace = true }
+futures-util = "0.3"

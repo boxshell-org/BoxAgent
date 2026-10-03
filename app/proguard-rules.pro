@@ -1,0 +1,2 @@
+-keep class com.boxagent.app.bridge.** { *; }
+-keepclasseswithmembernames class * { native <methods>; }

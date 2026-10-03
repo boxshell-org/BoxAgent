@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "boxagent-proto",
+    "boxagentd",
+    "boxagent-core",
+    "adb-tls",
+]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+anyhow = "1"
+rand = "0.8"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true

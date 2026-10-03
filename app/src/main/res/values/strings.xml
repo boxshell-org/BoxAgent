@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BoxAgent</string>
+    <string name="a11y_service_desc">BoxAgent uses accessibility access to read the \
+        screen and perform taps, swipes and text entry on behalf of the assistant.</string>
+    <string name="notification_channel">Agent runtime</string>
+    <string name="notification_running">BoxAgent is active</string>
+</resources>

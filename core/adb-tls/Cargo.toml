@@ -1,0 +1,19 @@
+[package]
+name = "adb-tls"
+version = "0.1.0"
+edition = "2021"
+description = "ADB wireless-debugging pairing (TLS + SPAKE2 + PeerInfo), per AOSP pairing_auth"
+
+[dependencies]
+adb_client = { version = "3.2.3", default-features = false }
+curve25519-dalek = "4"
+sha2 = "0.10"
+hkdf = "0.12"
+aes-gcm = "0.10"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = "1"
+rcgen = "0.14"
+rsa = "0.9"
+rand = "0.8"
+thiserror = { workspace = true }
+tracing = { workspace = true }

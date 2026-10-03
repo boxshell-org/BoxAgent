@@ -1,0 +1,22 @@
+# Android / Gradle
+.gradle/
+build/
+**/build/
+local.properties
+*.iml
+.idea/
+
+# Rust
+target/
+**/target/
+Cargo.lock
+
+# Native libs produced by cargo-ndk
+app/src/main/jniLibs/
+
+# Keystore / secrets
+*.keystore
+*.jks
+
+# OS
+.DS_Store
