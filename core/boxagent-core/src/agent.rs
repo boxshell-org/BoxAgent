@@ -189,8 +189,7 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
                         // Identical large result again (unchanged screen etc.):
                         // feed a marker; the real content is still in context.
                         Some(prev) if *prev == out && out.len() > DEDUP_MIN => {
-                            json!({"ok": true, "note": "unchanged from previous call"})
-                                .to_string()
+                            json!({"ok": true, "note": "unchanged from previous call"}).to_string()
                         }
                         _ => out.clone(),
                     };
@@ -219,7 +218,8 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
             let too_big: usize = messages.iter().map(|m| m.to_string().len()).sum();
             if too_many || too_big > MAX_CONTEXT_BYTES {
                 let keep_head = 2usize;
-                let tail = (MAX_HISTORY_MSGS - keep_head).min(messages.len().saturating_sub(keep_head));
+                let tail =
+                    (MAX_HISTORY_MSGS - keep_head).min(messages.len().saturating_sub(keep_head));
                 messages = [
                     messages[..keep_head].to_vec(),
                     vec![json!({
@@ -279,7 +279,10 @@ fn shrink_old_tool_results(messages: &mut Vec<Value>, budget: usize) {
         .map(|(i, _)| i)
         .collect();
     let keep_full = 4usize;
-    for &i in tool_idx.iter().take(tool_idx.len().saturating_sub(keep_full)) {
+    for &i in tool_idx
+        .iter()
+        .take(tool_idx.len().saturating_sub(keep_full))
+    {
         if let Some(c) = messages[i]["content"].as_str() {
             if c.len() > 200 {
                 messages[i]["content"] = json!(truncate(c, 200));

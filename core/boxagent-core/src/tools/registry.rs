@@ -409,7 +409,10 @@ impl Tool {
 }
 
 pub fn openai_tools(compact: bool) -> Value {
-    json!(all().iter().map(|t| t.openai_schema(compact)).collect::<Vec<_>>())
+    json!(all()
+        .iter()
+        .map(|t| t.openai_schema(compact))
+        .collect::<Vec<_>>())
 }
 
 pub fn catalog() -> Value {
@@ -442,4 +445,3 @@ mod tests {
         );
     }
 }
-
