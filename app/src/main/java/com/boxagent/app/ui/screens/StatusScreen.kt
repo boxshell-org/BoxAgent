@@ -36,6 +36,7 @@ import com.boxagent.app.ui.components.MonoText
 import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.SectionLabel
 import com.boxagent.app.ui.components.StatusPill
+import com.boxagent.app.ui.components.bwTextFieldColors
 import kotlinx.coroutines.launch
 
 @Composable
@@ -177,9 +178,9 @@ fun PairDialog(onPair: (host: String, port: String, code: String) -> Unit, onDis
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) })
-                TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) })
-                TextField(value = code, onValueChange = { code = it }, label = { Text(stringResource(R.string.pairing_code)) })
+                TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) }, colors = bwTextFieldColors())
+                TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) }, colors = bwTextFieldColors())
+                TextField(value = code, onValueChange = { code = it }, label = { Text(stringResource(R.string.pairing_code)) }, colors = bwTextFieldColors())
             }
         },
         confirmButton = {
@@ -204,8 +205,8 @@ fun ConnectDialog(onConnect: (host: String, port: String) -> Unit, onDismiss: ()
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) })
-                TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) })
+                TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) }, colors = bwTextFieldColors())
+                TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) }, colors = bwTextFieldColors())
             }
         },
         confirmButton = {

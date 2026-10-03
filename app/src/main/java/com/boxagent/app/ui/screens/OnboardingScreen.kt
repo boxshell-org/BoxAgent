@@ -35,7 +35,9 @@ import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.SectionLabel
+import com.boxagent.app.ui.components.StatusDot
 import com.boxagent.app.ui.components.StatusPill
+import com.boxagent.app.ui.components.bwTextFieldColors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -198,11 +200,11 @@ fun OnboardingScreen(app: BoxAgentApp) {
             PillButton(stringResource(R.string.skip_for_now), filled = false, onClick = {
                 scope.launch { app.settings.setOnboarded(true) }
             })
-            Text(
-                stringResource(R.string.page_fmt, pager.currentPage + 1, 3),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                repeat(3) { i ->
+                    StatusDot(on = i <= pager.currentPage, size = 7.dp)
+                }
+            }
         }
     }
 
@@ -270,6 +272,7 @@ private fun Field(label: String, value: String, onChange: (String) -> Unit) {
         onValueChange = onChange,
         label = { Text(label) },
         singleLine = true,
+        colors = bwTextFieldColors(),
         modifier = Modifier.fillMaxWidth(),
     )
 }

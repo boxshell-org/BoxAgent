@@ -43,10 +43,11 @@ import com.boxagent.app.llm.CatalogModel
 import com.boxagent.app.llm.CatalogProvider
 import com.boxagent.app.ui.Hairline
 import com.boxagent.app.ui.components.BwCard
+import com.boxagent.app.ui.components.BwSwitch
 import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.SectionLabel
+import com.boxagent.app.ui.components.bwTextFieldColors
 import com.boxagent.app.ui.components.MonoText
-import com.boxagent.app.ui.theme.BwShape
 import com.boxagent.app.util.LocaleHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -431,6 +432,7 @@ private fun SettingField(
         visualTransformation = if (secret)
             androidx.compose.ui.text.input.PasswordVisualTransformation()
         else androidx.compose.ui.text.input.VisualTransformation.None,
+        colors = bwTextFieldColors(),
         modifier = modifier.fillMaxWidth(),
     )
 }
@@ -445,20 +447,7 @@ private fun ToggleRow(label: String, on: Boolean, onToggle: (Boolean) -> Unit) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(label, style = MaterialTheme.typography.bodyMedium)
-        androidx.compose.material3.Surface(
-            shape = BwShape.Pill,
-            color = if (on) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier.padding(2.dp),
-        ) {
-            Text(
-                stringResource(if (on) R.string.toggle_on else R.string.toggle_off),
-                style = MaterialTheme.typography.labelMedium,
-                color = if (on) MaterialTheme.colorScheme.onPrimary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-            )
-        }
+        BwSwitch(checked = on, onToggle = onToggle)
     }
 }
 

@@ -90,6 +90,7 @@ fun LogsScreen(app: BoxAgentApp) {
                 Row(
                     Modifier
                         .fillMaxWidth()
+                        .animateItem()
                         .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {

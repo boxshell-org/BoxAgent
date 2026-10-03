@@ -1,5 +1,15 @@
 package com.boxagent.app.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -11,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -99,12 +110,27 @@ private fun MainShell(app: BoxAgentApp) {
         Hairline()
 
         Box(Modifier.weight(1f)) {
-            when (tab) {
-                Tab.CHAT -> ChatScreen(app)
-                Tab.TOOLS -> ToolsScreen(app)
-                Tab.STATUS -> StatusScreen(app)
-                Tab.LOGS -> LogsScreen(app)
-                Tab.SETTINGS -> SettingsScreen(app)
+            AnimatedContent(
+                targetState = tab,
+                transitionSpec = {
+                    val forward = targetState.ordinal > initialState.ordinal
+                    (slideInHorizontally(tween(280)) { if (forward) it / 4 else -it / 4 } +
+                        fadeIn(tween(220)))
+                        .togetherWith(
+                            slideOutHorizontally(tween(280)) {
+                                if (forward) -it / 4 else it / 4
+                            } + fadeOut(tween(180)),
+                        )
+                },
+                label = "tabContent",
+            ) { t ->
+                when (t) {
+                    Tab.CHAT -> ChatScreen(app)
+                    Tab.TOOLS -> ToolsScreen(app)
+                    Tab.STATUS -> StatusScreen(app)
+                    Tab.LOGS -> LogsScreen(app)
+                    Tab.SETTINGS -> SettingsScreen(app)
+                }
             }
         }
 
@@ -122,18 +148,26 @@ private fun MainShell(app: BoxAgentApp) {
                         Text(
                             stringResource(t.labelRes),
                             style = MaterialTheme.typography.labelMedium,
-                            color = if (t == tab) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = androidx.compose.animation.animateColorAsState(
+                                if (t == tab) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                tween(220), label = "tabLabel",
+                            ).value,
+                        )
+                        val barWidth by animateDpAsState(
+                            targetValue = if (t == tab) 22.dp else 0.dp,
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium,
+                            ),
+                            label = "tabBar",
                         )
                         Box(
                             Modifier
                                 .padding(top = 4.dp)
                                 .height(2.dp)
-                                .fillMaxWidth(0.4f)
-                                .background(
-                                    if (t == tab) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.surface,
-                                ),
+                                .width(barWidth)
+                                .background(MaterialTheme.colorScheme.primary),
                         )
                     }
                 }

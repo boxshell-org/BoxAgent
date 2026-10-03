@@ -36,6 +36,7 @@ import com.boxagent.app.ui.Hairline
 import com.boxagent.app.ui.components.MonoText
 import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.StatusPill
+import com.boxagent.app.ui.components.bwTextFieldColors
 import com.boxagent.app.ui.theme.BwShape
 import kotlinx.coroutines.launch
 
@@ -162,6 +163,7 @@ private fun ToolDialog(app: BoxAgentApp, tool: ToolSpec, onDismiss: () -> Unit) 
                     value = args,
                     onValueChange = { args = it },
                     label = { Text(stringResource(R.string.args_json)) },
+                    colors = bwTextFieldColors(),
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 80.dp),

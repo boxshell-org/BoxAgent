@@ -1,5 +1,17 @@
 package com.boxagent.app.ui.screens
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,7 +31,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -34,6 +45,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -107,7 +119,7 @@ fun ChatScreen(app: BoxAgentApp) {
                 item { EmptyState(app, daemonStatus.shell == ShellState.ONLINE, onPrompt = { input = it }) }
             }
             items(state.messages, key = { it.id }) { msg ->
-                MessageRow(msg)
+                Box(Modifier.animateItem()) { MessageRow(msg) }
             }
             if (state.currentAssistantText.isNotEmpty()) {
                 item {
@@ -120,11 +132,7 @@ fun ChatScreen(app: BoxAgentApp) {
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(
-                            Modifier.size(14.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
+                        TypingDots()
                         Text(
                             stringResource(R.string.chat_working),
                             style = MaterialTheme.typography.labelMedium,
@@ -152,17 +160,28 @@ fun ChatScreen(app: BoxAgentApp) {
         }
 
         // Pending confirmations and questions
-        pendingConfirm?.let { pc ->
-            ConfirmCard(
-                tool = pc.tool,
-                args = pc.argsJson,
-                risk = pc.risk,
-                onResolve = { approved, always ->
-                    app.toolRunner.resolveConfirm(approved, always)
-                },
-            )
+        AnimatedVisibility(
+            visible = pendingConfirm != null,
+            enter = slideInVertically(tween(260)) { it / 2 } + fadeIn(tween(220)),
+            exit = slideOutVertically(tween(200)) { it / 2 } + fadeOut(tween(160)),
+        ) {
+            pendingConfirm?.let { pc ->
+                ConfirmCard(
+                    tool = pc.tool,
+                    args = pc.argsJson,
+                    risk = pc.risk,
+                    onResolve = { approved, always ->
+                        app.toolRunner.resolveConfirm(approved, always)
+                    },
+                )
+            }
         }
-        state.pendingAsk?.let { ask ->
+        AnimatedVisibility(
+            visible = state.pendingAsk != null,
+            enter = slideInVertically(tween(260)) { it / 2 } + fadeIn(tween(220)),
+            exit = slideOutVertically(tween(200)) { it / 2 } + fadeOut(tween(160)),
+        ) {
+            state.pendingAsk?.let { ask ->
             BwCard(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
                 Column {
                     Text(stringResource(R.string.chat_assistant_asks), style = MaterialTheme.typography.labelLarge)
@@ -182,6 +201,7 @@ fun ChatScreen(app: BoxAgentApp) {
                     }
                 }
             }
+            }
         }
 
         // Input dock
@@ -199,14 +219,23 @@ fun ChatScreen(app: BoxAgentApp) {
                 placeholder = stringResource(R.string.chat_input_hint),
                 enabled = !state.running,
             )
-            if (state.running) {
-                PillButton(stringResource(R.string.stop), onClick = { app.agent.cancel() },
-                    filled = false, modifier = Modifier.padding(start = 8.dp))
-            } else {
-                PillButton(stringResource(R.string.send), onClick = {
-                    app.agent.send(input)
-                    input = ""
-                }, enabled = input.isNotBlank(), modifier = Modifier.padding(start = 8.dp))
+            AnimatedContent(
+                targetState = state.running,
+                transitionSpec = {
+                    fadeIn(tween(160)).togetherWith(fadeOut(tween(120)))
+                },
+                label = "sendStop",
+                modifier = Modifier.padding(start = 8.dp),
+            ) { running ->
+                if (running) {
+                    PillButton(stringResource(R.string.stop), onClick = { app.agent.cancel() },
+                        filled = false)
+                } else {
+                    PillButton(stringResource(R.string.send), onClick = {
+                        app.agent.send(input)
+                        input = ""
+                    }, enabled = input.isNotBlank())
+                }
             }
         }
     }
@@ -333,13 +362,48 @@ private fun MessageRow(msg: ChatMsg) {
         else -> Column(Modifier.fillMaxWidth().padding(end = 24.dp)) {
             Text(msg.text, style = MaterialTheme.typography.bodyMedium)
             if (msg.streaming) {
+                val pulse by rememberInfiniteTransition(label = "stream")
+                    .animateFloat(
+                        initialValue = 0.25f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            tween(700), RepeatMode.Reverse,
+                        ),
+                        label = "streamDot",
+                    )
                 Box(
                     Modifier
                         .padding(top = 4.dp)
                         .size(6.dp)
+                        .alpha(pulse)
                         .background(MaterialTheme.colorScheme.primary, BwShape.Pill),
                 )
             }
+        }
+    }
+}
+
+/** Three staggered dots — the "thinking" affordance while the agent works. */
+@Composable
+private fun TypingDots() {
+    val transition = rememberInfiniteTransition(label = "typing")
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        repeat(3) { i ->
+            val alpha by transition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(600, delayMillis = i * 160),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+                label = "dot$i",
+            )
+            Box(
+                Modifier
+                    .size(5.dp)
+                    .alpha(alpha)
+                    .background(MaterialTheme.colorScheme.primary, BwShape.Pill),
+            )
         }
     }
 }
@@ -370,10 +434,18 @@ private fun ToolCallsColumn(msg: ChatMsg) {
                             modifier = Modifier.padding(start = 6.dp),
                         )
                     }
-                    if (expanded) {
-                        MonoText(call.args.take(600), Modifier.padding(top = 6.dp))
-                        call.result?.let {
-                            MonoText(it.take(1200), Modifier.padding(top = 4.dp), maxLines = 24)
+                    AnimatedVisibility(
+                        visible = expanded,
+                        enter = androidx.compose.animation.expandVertically(tween(240)) +
+                            fadeIn(tween(200)),
+                        exit = androidx.compose.animation.shrinkVertically(tween(180)) +
+                            fadeOut(tween(140)),
+                    ) {
+                        Column {
+                            MonoText(call.args.take(600), Modifier.padding(top = 6.dp))
+                            call.result?.let {
+                                MonoText(it.take(1200), Modifier.padding(top = 4.dp), maxLines = 24)
+                            }
                         }
                     }
                 }
