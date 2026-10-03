@@ -75,7 +75,14 @@ async fn handle_conn(stream: UnixStream, args: Arc<Args>) -> Result<()> {
     match &first {
         Request::Auth { token } if token == &args.token => {
             let uid = unsafe { libc::getuid() } as u32;
-            write_frame(&mut wr, &Response::AuthOk { uid }).await?;
+            write_frame(
+                &mut wr,
+                &Response::AuthOk {
+                    uid,
+                    version: env!("BOXAGENT_APP_VERSION").to_string(),
+                },
+            )
+            .await?;
         }
         _ => {
             let _ = write_frame(
@@ -145,6 +152,10 @@ async fn dispatch(
         },
         Request::Screencap { id } => {
             exec::screencap(id, wr).await?;
+        }
+        Request::Shutdown => {
+            info!("shutdown requested");
+            std::process::exit(0);
         }
         Request::Auth { .. } => {
             let _ = rd; // already authed; ignore repeats

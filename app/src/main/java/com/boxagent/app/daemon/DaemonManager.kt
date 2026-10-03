@@ -2,6 +2,7 @@ package com.boxagent.app.daemon
 
 import android.content.Context
 import android.util.Base64
+import com.boxagent.app.BuildConfig
 import com.boxagent.app.bridge.Core
 import com.boxagent.app.data.Secrets
 import com.boxagent.app.data.Settings
@@ -27,6 +28,7 @@ data class DaemonStatus(
     val uid: Int = -1,
     val detail: String = "",
     val socket: String = "",
+    val daemonVersion: String = "",
 )
 
 /**
@@ -83,57 +85,64 @@ class DaemonManager(
      */
     suspend fun connectAndSpawn(host: String, port: Int): Result<DaemonClient> =
         withContext(Dispatchers.IO) {
-            lock.withLock {
-                _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:connecting_adb")
-                runCatching {
-                    val pem = ensureKey()
-                    val daemonBytes = daemonBinary()
-                    val socket = "boxagentd.${rand.nextInt().toString(16)}"
-                    val token = ByteArray(24).also { rand.nextBytes(it) }
-                        .joinToString("") { "%02x".format(it) }
-                    val daemonB64 = Base64.encodeToString(daemonBytes, Base64.NO_WRAP)
-
-                    val resp = JSONObject(
-                        Core.nativeSpawnDaemon(
-                            pem, host, port, daemonB64,
-                            REMOTE_PATH, socket, token,
-                        )
-                    )
-                    if (!resp.optBoolean("ok")) error(resp.optString("error"))
-
-                    // Give the daemon a moment to bind, then connect.
-                    var cli: DaemonClient? = null
-                    var lastErr: Exception? = null
-                    repeat(8) {
-                        try {
-                            cli = DaemonClient.connect(socket, token)
-                        } catch (e: Exception) {
-                            lastErr = e
-                        }
-                        if (cli != null) return@repeat
-                        delay(400)
-                    }
-                    cli ?: throw lastErr ?: IllegalStateException("socket connect failed")
-
-                    secrets.daemonToken = token
-                    settings.setDaemonSocket(socket)
-                    settings.setAdbEndpoint(host, port)
-                    client = cli
-                    _status.value = DaemonStatus(
-                        ShellState.ONLINE,
-                        uid = 2000,
-                        detail = "key:daemon_up",
-                        socket = socket,
-                    )
-                    startWatchdog()
-                    cli
-                }.onFailure {
-                    _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "key:spawn_failed")
-                }
-            }
+            lock.withLock { connectAndSpawnLocked(host, port) }
         }
 
-    /** Reconnect to an already-spawned daemon (e.g. after app restart). */
+    /** Lock-free inner of [connectAndSpawn] — callers must hold [lock]. */
+    private suspend fun connectAndSpawnLocked(host: String, port: Int): Result<DaemonClient> {
+        _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:connecting_adb")
+        return runCatching {
+            val pem = ensureKey()
+            val daemonBytes = daemonBinary()
+            val socket = "boxagentd.${rand.nextInt().toString(16)}"
+            val token = ByteArray(24).also { rand.nextBytes(it) }
+                .joinToString("") { "%02x".format(it) }
+            val daemonB64 = Base64.encodeToString(daemonBytes, Base64.NO_WRAP)
+
+            val resp = JSONObject(
+                Core.nativeSpawnDaemon(
+                    pem, host, port, daemonB64,
+                    REMOTE_PATH, socket, token,
+                )
+            )
+            if (!resp.optBoolean("ok")) error(resp.optString("error"))
+
+            // Give the daemon a moment to bind, then connect.
+            var cli: DaemonClient? = null
+            var lastErr: Exception? = null
+            repeat(8) {
+                try {
+                    cli = DaemonClient.connect(socket, token)
+                } catch (e: Exception) {
+                    lastErr = e
+                }
+                if (cli != null) return@repeat
+                delay(400)
+            }
+            cli ?: throw lastErr ?: IllegalStateException("socket connect failed")
+
+            secrets.daemonToken = token
+            settings.setDaemonSocket(socket)
+            settings.setAdbEndpoint(host, port)
+            client = cli
+            _status.value = DaemonStatus(
+                ShellState.ONLINE,
+                uid = 2000,
+                detail = "key:daemon_up",
+                socket = socket,
+                daemonVersion = cli!!.daemonVersion,
+            )
+            startWatchdog()
+            cli
+        }.onFailure {
+            _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "key:spawn_failed")
+        }
+    }
+
+    /** Reconnect to an already-spawned daemon (e.g. after app restart).
+     *  Overwrite-installed upgrades leave the previous daemon running;
+     *  auth_ok carries its build version — respawn on mismatch so the wire
+     *  protocol can't drift between app and daemon. */
     suspend fun reconnect(): DaemonClient? = lock.withLock {
         val socket = settings.daemonSocket.first()
         val token = secrets.daemonToken
@@ -143,8 +152,27 @@ class DaemonManager(
             cli.close()
             return@withLock null
         }
+        if (cli.daemonVersion != BuildConfig.VERSION_NAME) {
+            cli.shutdown()
+            val host = settings.adbHost.first()
+            val port = settings.adbPort.first()
+            if (port > 0) {
+                _status.value = DaemonStatus(
+                    ShellState.CONNECTING,
+                    detail = "key:daemon_upgrade",
+                )
+                return connectAndSpawnLocked(host, port).getOrNull()
+            }
+            return@withLock null
+        }
         client = cli
-        _status.value = DaemonStatus(ShellState.ONLINE, uid = 2000, detail = "key:reconnected", socket = socket)
+        _status.value = DaemonStatus(
+            ShellState.ONLINE,
+            uid = 2000,
+            detail = "key:reconnected",
+            socket = socket,
+            daemonVersion = cli.daemonVersion,
+        )
         startWatchdog()
         cli
     }

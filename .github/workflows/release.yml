@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe/rev-list drive versionName/versionCode
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -34,11 +36,21 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.0.12077973"
           bash scripts/build-rust.sh "$PWD/app/src/main/jniLibs"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Assemble debug APK
-        run: ./gradlew :app:assembleDebug -PskipRustBuild=true --console=plain
+      - name: Decode signing keystore
+        run: |
+          echo "${{ secrets.CI_KEYSTORE_B64 }}" | base64 -d > /tmp/boxagent.keystore
+          ls -l /tmp/boxagent.keystore
+      - name: Assemble signed release APK
+        env:
+          CI_KEYSTORE: /tmp/boxagent.keystore
+          CI_KEYSTORE_PASSWORD: ${{ secrets.CI_KEYSTORE_PASSWORD }}
+          CI_KEY_ALIAS: ${{ secrets.CI_KEY_ALIAS }}
+          CI_KEY_PASSWORD: ${{ secrets.CI_KEY_PASSWORD }}
+          VERSION_NAME: ${{ github.ref_name }}
+        run: ./gradlew :app:assembleRelease -PskipRustBuild=true --console=plain
       - name: Rename artifact
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk \
+          cp app/build/outputs/apk/release/app-release.apk \
              "BoxAgent-${{ github.ref_name }}.apk"
       - name: Create GitHub release
         env:

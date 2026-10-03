@@ -1,3 +1,5 @@
+import java.io.ByteArrayOutputStream
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -5,6 +7,33 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
 }
+
+// ---- version derivation --------------------------------------------------
+// versionName: latest git tag (v0.1.1-beta -> 0.1.1-beta), or VERSION_NAME env
+// versionCode: commit count (monotonic on main), or VERSION_CODE env
+fun gitOut(vararg args: String): String = try {
+    val out = ByteArrayOutputStream()
+    exec {
+        commandLine("git", *args)
+        standardOutput = out
+        errorOutput = ByteArrayOutputStream()
+        isIgnoreExitValue = true
+    }
+    out.toString().trim()
+} catch (e: Exception) {
+    ""
+}
+
+val appVersionName = (System.getenv("VERSION_NAME")
+    ?: gitOut("describe", "--tags", "--abbrev=0"))
+    .removePrefix("v").ifEmpty { "0.1.0-dev" }
+val appVersionCode = System.getenv("VERSION_CODE")?.toIntOrNull()
+    ?: gitOut("rev-list", "--count", "HEAD").toIntOrNull() ?: 1
+
+// CI release builds sign with a persistent keystore injected via env so every
+// published APK shares one identity and overwrite-install works. Local builds
+// keep the per-machine debug key.
+val ciKeystore = System.getenv("CI_KEYSTORE")?.takeIf { it.isNotEmpty() }
 
 android {
     namespace = "com.boxagent.app"
@@ -14,15 +43,27 @@ android {
         applicationId = "com.boxagent.app"
         minSdk = 30
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         buildConfigField("String", "CORE_LIB", "\"boxagent\"")
+    }
+
+    signingConfigs {
+        if (ciKeystore != null) {
+            create("ci") {
+                storeFile = file(ciKeystore)
+                storePassword = System.getenv("CI_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CI_KEY_ALIAS") ?: "boxagent"
+                keyPassword = System.getenv("CI_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (ciKeystore != null) signingConfig = signingConfigs.getByName("ci")
         }
         debug {
             applicationIdSuffix = ".debug"
@@ -72,6 +113,8 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     environment("ANDROID_NDK_HOME", providers.environmentVariable("ANDROID_NDK_HOME")
         .orElse(providers.environmentVariable("ANDROID_HOME").map { "$it/ndk/27.0.12077973" })
         .get())
+    // Daemon binary is stamped with this; the app respawns it on mismatch.
+    environment("BOXAGENT_APP_VERSION", appVersionName)
 }
 
 tasks.named("preBuild") {

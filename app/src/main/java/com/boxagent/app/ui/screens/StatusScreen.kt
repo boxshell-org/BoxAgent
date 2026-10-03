@@ -59,7 +59,9 @@ fun StatusScreen(app: BoxAgentApp) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 CapabilityRow(stringResource(R.string.shell_daemon), st.shell == ShellState.ONLINE,
                     when (st.shell) {
-                        ShellState.ONLINE -> "uid 2000"
+                        ShellState.ONLINE ->
+                            if (st.daemonVersion.isEmpty()) "uid 2000"
+                            else "uid 2000 · v${st.daemonVersion}"
                         ShellState.PAIRING -> stringResource(R.string.d_pairing)
                         ShellState.CONNECTING -> stringResource(R.string.d_connecting)
                         ShellState.ERROR -> daemonDetail(st.detail)
@@ -223,6 +225,7 @@ private fun daemonDetail(detail: String): String {
         "daemon_up" -> R.string.d_daemon_up
         "reconnected" -> R.string.d_reconnected
         "daemon_lost" -> R.string.d_daemon_lost
+        "daemon_upgrade" -> R.string.d_daemon_upgrade
         "pair_failed" -> R.string.d_pair_failed
         "spawn_failed" -> R.string.d_spawn_failed
         else -> return detail

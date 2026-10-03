@@ -10,6 +10,15 @@ set -euo pipefail
 JNILIBS="$1"
 cd "$(dirname "$0")/../core"
 
+# Stamp the daemon with the app version (see boxagentd/build.rs). Gradle
+# passes the same value via the cargoNdkBuild task env; standalone builds
+# fall back to the latest git tag so both paths stay consistent.
+if [ -z "${BOXAGENT_APP_VERSION:-}" ]; then
+    BOXAGENT_APP_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
+    BOXAGENT_APP_VERSION="${BOXAGENT_APP_VERSION:-dev}"
+fi
+export BOXAGENT_APP_VERSION
+
 ABIS=("arm64-v8a" "x86_64")
 
 cargo ndk -t arm64-v8a -t x86_64 -o "$JNILIBS" build --release -p boxagent-core

@@ -42,6 +42,9 @@ pub enum Request {
     Screencap {
         id: u64,
     },
+    /// Ask the daemon to exit — used when the app was overwrite-installed
+    /// with a newer build and the running daemon is stale.
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +52,10 @@ pub enum Request {
 pub enum Response {
     AuthOk {
         uid: u32,
+        /// Daemon build version (app versionName it shipped with). Empty
+        /// on daemons that predate the version handshake.
+        #[serde(default)]
+        version: String,
     },
     Pong,
     /// Streaming exec output. `stream`: "stdout" | "stderr".

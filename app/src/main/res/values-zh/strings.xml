@@ -59,6 +59,7 @@
     <string name="d_connecting">连接中…</string>
     <string name="d_pair_failed">配对失败</string>
     <string name="d_spawn_failed">启动失败</string>
+    <string name="d_daemon_upgrade">正在升级守护进程…</string>
 
     <!-- status -->
     <string name="capabilities">能力</string>
@@ -117,6 +118,12 @@
     <string name="temperature">温度</string>
     <string name="max_tokens">最大 token 数</string>
     <string name="system_prompt">系统提示词</string>
+    <string name="models">模型 ▾</string>
+    <string name="models_empty">未返回模型</string>
+    <string name="models_error">拉取失败</string>
+    <string name="save_preset">保存预设</string>
+    <string name="preset_label">预设</string>
+    <string name="preset_name">预设名称</string>
     <string name="save">保存</string>
     <string name="test">测试</string>
     <string name="safety">安全</string>

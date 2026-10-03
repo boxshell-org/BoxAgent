@@ -36,6 +36,10 @@ class DaemonClient private constructor(
 
     val isAlive: Boolean get() = socket.isConnected
 
+    /** Daemon build version, reported in the auth_ok frame ("" on old daemons). */
+    var daemonVersion: String = ""
+        private set
+
     suspend fun ping(): Boolean = withContext(Dispatchers.IO) {
         io.withLock {
             try {
@@ -128,6 +132,18 @@ class DaemonClient private constructor(
         }
     }
 
+    /** Ask the daemon to exit cleanly (best-effort — the socket just closes). */
+    suspend fun shutdown() {
+        withContext(Dispatchers.IO) {
+            io.withLock {
+                runCatching {
+                    send(JSONObject().put("type", "shutdown"))
+                }
+            }
+        }
+        close()
+    }
+
     suspend fun screencap(): ByteArray = withContext(Dispatchers.IO) {
         io.withLock {
             send(JSONObject().put("type", "screencap").put("id", nextId++))
@@ -173,6 +189,7 @@ class DaemonClient private constructor(
                     client.send(JSONObject().put("type", "auth").put("token", token))
                     val f = client.recv()
                     if (f.optString("type") == "auth_ok") {
+                        client.daemonVersion = f.optString("version")
                         socket.soTimeout = 0
                         client
                     } else {
