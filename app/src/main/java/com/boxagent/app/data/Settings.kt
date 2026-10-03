@@ -39,6 +39,7 @@ class Settings(private val context: Context) {
         val KEY_ADB_HOST = stringPreferencesKey("adb_host")
         val KEY_ADB_PORT = intPreferencesKey("adb_port")
         val KEY_THEME = stringPreferencesKey("theme")
+        val KEY_CUSTOM_PROVIDERS = stringPreferencesKey("custom_providers")
 
         const val DEFAULT_SYSTEM_PROMPT =
             "You are BoxAgent, an operator running on the user's Android phone. " +
@@ -71,6 +72,47 @@ class Settings(private val context: Context) {
     val adbHost: Flow<String> = context.prefs.data.map { it[KEY_ADB_HOST] ?: "127.0.0.1" }
     val adbPort: Flow<Int> = context.prefs.data.map { it[KEY_ADB_PORT] ?: 0 }
     val theme: Flow<String> = context.prefs.data.map { it[KEY_THEME] ?: "system" }
+
+    /** User-saved provider presets (name/baseUrl/model) as a JSON array. */
+    val customProviders: Flow<List<LlmProfile>> = context.prefs.data.map { p ->
+        runCatching {
+            val arr = org.json.JSONArray(p[KEY_CUSTOM_PROVIDERS] ?: "[]")
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                LlmProfile(
+                    name = o.optString("name"),
+                    baseUrl = o.optString("base_url"),
+                    model = o.optString("model"),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    suspend fun saveCustomProvider(p: LlmProfile) = context.prefs.edit { prefs ->
+        val arr = org.json.JSONArray(prefs[KEY_CUSTOM_PROVIDERS] ?: "[]")
+        val out = org.json.JSONArray()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("name") != p.name) out.put(o)
+        }
+        out.put(
+            org.json.JSONObject()
+                .put("name", p.name)
+                .put("base_url", p.baseUrl)
+                .put("model", p.model)
+        )
+        prefs[KEY_CUSTOM_PROVIDERS] = out.toString()
+    }
+
+    suspend fun removeCustomProvider(name: String) = context.prefs.edit { prefs ->
+        val arr = org.json.JSONArray(prefs[KEY_CUSTOM_PROVIDERS] ?: "[]")
+        val out = org.json.JSONArray()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("name") != name) out.put(o)
+        }
+        prefs[KEY_CUSTOM_PROVIDERS] = out.toString()
+    }
 
     suspend fun setLlm(baseUrl: String, model: String, temperature: Double, maxTokens: Int) {
         context.prefs.edit {

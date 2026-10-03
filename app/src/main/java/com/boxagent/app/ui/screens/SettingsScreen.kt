@@ -2,6 +2,7 @@ package com.boxagent.app.ui.screens
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,6 +10,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
@@ -30,7 +34,9 @@ import com.boxagent.app.BoxAgentApp
 import com.boxagent.app.R
 import com.boxagent.app.bridge.Core
 import com.boxagent.app.data.ConfirmPolicy
+import com.boxagent.app.data.LlmProfile
 import com.boxagent.app.data.Settings
+import com.boxagent.app.llm.ModelFetcher
 import com.boxagent.app.ui.Hairline
 import com.boxagent.app.ui.components.BwCard
 import com.boxagent.app.ui.components.PillButton
@@ -75,6 +81,26 @@ fun SettingsScreen(app: BoxAgentApp) {
     var sysPrompt by remember(systemPrompt) { mutableStateOf(systemPrompt) }
     var stepsStr by remember(maxSteps) { mutableStateOf(maxSteps.toString()) }
     var testResult by remember { mutableStateOf<String?>(null) }
+    var showPresetDialog by remember { mutableStateOf(false) }
+    var models by remember { mutableStateOf<List<String>>(emptyList()) }
+    var modelsLoading by remember { mutableStateOf(false) }
+    var modelsErr by remember { mutableStateOf<String?>(null) }
+    var modelsExpanded by remember { mutableStateOf(false) }
+    val customs by s.customProviders.collectAsState(initial = emptyList())
+
+    // Auto-fetch the model list whenever the endpoint or key changes.
+    androidx.compose.runtime.LaunchedEffect(url, apiKey) {
+        models = emptyList(); modelsErr = null
+        if (url.isBlank()) return@LaunchedEffect
+        kotlinx.coroutines.delay(800) // debounce typing
+        modelsLoading = true
+        models = runCatching { ModelFetcher.list(url, apiKey) }
+            .getOrElse {
+                modelsErr = it.message
+                emptyList()
+            }
+        modelsLoading = false
+    }
 
     Column(
         Modifier
@@ -101,10 +127,79 @@ fun SettingsScreen(app: BoxAgentApp) {
                             scope.launch { s.setLlm(u, m, tempStr.toDoubleOrNull() ?: 0.2, tokStr.toIntOrNull() ?: 4096) }
                         })
                     }
+                    PillButton("+ " + stringResource(R.string.preset_label),
+                        filled = false, onClick = { showPresetDialog = true })
+                }
+                if (customs.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        customs.forEach { p ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                PillButton(p.name, filled = false, onClick = {
+                                    url = p.baseUrl; mdl = p.model
+                                    scope.launch {
+                                        s.setLlm(p.baseUrl, p.model,
+                                            tempStr.toDoubleOrNull() ?: 0.2,
+                                            tokStr.toIntOrNull() ?: 4096)
+                                    }
+                                })
+                                Text(
+                                    "×",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .clickable {
+                                            scope.launch { s.removeCustomProvider(p.name) }
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 8.dp),
+                                )
+                            }
+                        }
+                    }
                 }
                 SettingField(stringResource(R.string.api_key), apiKey, { apiKey = it }, secret = true)
                 SettingField(stringResource(R.string.base_url), url, { url = it })
-                SettingField(stringResource(R.string.model), mdl, { mdl = it })
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SettingField(stringResource(R.string.model), mdl, { mdl = it },
+                        Modifier.weight(1f))
+                    Box {
+                        PillButton(
+                            if (modelsLoading) "…" else stringResource(R.string.models),
+                            filled = false,
+                            onClick = { modelsExpanded = true },
+                        )
+                        DropdownMenu(
+                            expanded = modelsExpanded,
+                            onDismissRequest = { modelsExpanded = false },
+                        ) {
+                            if (models.isEmpty()) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            stringResource(
+                                                if (modelsErr != null) R.string.models_error
+                                                else R.string.models_empty
+                                            ),
+                                        )
+                                    },
+                                    onClick = { modelsExpanded = false },
+                                )
+                            }
+                            models.forEach { m ->
+                                DropdownMenuItem(
+                                    text = { Text(m) },
+                                    onClick = { mdl = m; modelsExpanded = false },
+                                )
+                            }
+                        }
+                    }
+                }
+                modelsErr?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary)
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SettingField(stringResource(R.string.temperature), tempStr, { tempStr = it },
                         Modifier.weight(1f))
@@ -231,6 +326,18 @@ fun SettingsScreen(app: BoxAgentApp) {
             scope.launch { s.setOnboarded(false) }
         })
     }
+
+    if (showPresetDialog) {
+        PresetDialog(
+            onSave = { name ->
+                scope.launch {
+                    s.saveCustomProvider(LlmProfile(name = name, baseUrl = url, model = mdl))
+                }
+                showPresetDialog = false
+            },
+            onDismiss = { showPresetDialog = false },
+        )
+    }
 }
 
 @Composable
@@ -290,3 +397,22 @@ private fun policyName(p: ConfirmPolicy): String = stringResource(
         ConfirmPolicy.AUTONOMOUS -> R.string.policy_autonomous
     },
 )
+
+@Composable
+private fun PresetDialog(onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.save_preset), style = MaterialTheme.typography.titleMedium) },
+        text = {
+            SettingField(stringResource(R.string.preset_name), name, { name = it })
+        },
+        confirmButton = {
+            PillButton(stringResource(R.string.save), onClick = { onSave(name.trim()) },
+                enabled = name.isNotBlank())
+        },
+        dismissButton = {
+            PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss)
+        },
+    )
+}
