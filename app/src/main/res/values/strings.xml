@@ -26,6 +26,7 @@
     <string name="chat_history">History</string>
     <string name="chat_conv">Conv %1$s</string>
     <string name="chat_working">working…</string>
+    <string name="chat_stopped">Stopped.</string>
     <string name="chat_assistant_asks">Assistant asks</string>
     <string name="chat_answer_hint">answer…</string>
     <string name="send">Send</string>

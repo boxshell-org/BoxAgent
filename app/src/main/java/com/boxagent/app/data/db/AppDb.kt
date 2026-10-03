@@ -57,6 +57,8 @@ interface ConversationDao {
     fun all(): Flow<List<Conversation>>
     @Query("UPDATE conversations SET title = :title, updatedAt = :ts WHERE id = :id")
     suspend fun touch(id: Long, title: String, ts: Long = System.currentTimeMillis())
+    @Query("UPDATE conversations SET updatedAt = :ts WHERE id = :id")
+    suspend fun bump(id: Long, ts: Long = System.currentTimeMillis())
     @Query("DELETE FROM conversations WHERE id = :id")
     suspend fun delete(id: Long)
 }

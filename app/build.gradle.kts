@@ -46,6 +46,10 @@ android {
         versionCode = appVersionCode
         versionName = appVersionName
         buildConfigField("String", "CORE_LIB", "\"boxagent\"")
+        // Only the ABIs cargo-ndk builds (scripts/build-rust.sh). Without
+        // this, androidx's armeabi-v7a/x86 libs make 32-bit devices accept
+        // the APK and then crash on loadLibrary("boxagent").
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     signingConfigs {

@@ -91,10 +91,10 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "app_launch", "Launch an app",
-            "Start an app's main activity, or a specific component as package/.Activity.",
+            "Start an app's launcher activity, or a specific activity of it.",
             obj(json!({
-                "package": s("Package name, or component package/.Activity"),
-                "component": s("Explicit component (overrides package)")
+                "package": s("Package name (or package/.Activity)"),
+                "component": s("Optional activity: .Relative, full.class.Name or package/.Activity")
             }), &["package"]),
             Moderate, "shell",
         ),
@@ -127,7 +127,8 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "screen_capture", "Capture screen",
-            "Take a screenshot of the primary display (`screencap`). Returns base64 image.",
+            "Take a screenshot of the primary display (`screencap` PNG). The image is \
+             not shown to you — only its size; read the screen with ui_tree / ui_find.",
             obj(json!({}), &[]),
             Readonly, "shell",
         ),
@@ -164,8 +165,8 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "file_read", "Read a file",
-            "Read a file (shell permissions). Returns text when UTF-8 \
-             decodable, base64 otherwise.",
+            "Read a file (shell permissions). Returns up to 4000 chars of text when \
+             UTF-8 decodable; binary content is reported by size only.",
             obj(json!({"path": s("Absolute path")}), &["path"]),
             Readonly, "shell",
         ),
@@ -280,6 +281,7 @@ pub fn all() -> Vec<Tool> {
                 "x": i("X"), "y": i("Y"),
                 "text": s("Node text selector"),
                 "desc": s("Node content-desc selector"),
+                "resource_id": s("Node view id selector"),
                 "duration_ms": i("Hold duration (default 800)")
             }), &[]),
             Moderate, "a11y",
@@ -306,11 +308,13 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "scroll", "Scroll",
-            "Scroll a direction on the screen or on a scrollable node.",
+            "Scroll the screen, or inside the node matching `text`. Direction is where \
+             you want to move in the content: down reveals content further down (the \
+             finger swipes up), like scrolling a web page.",
             obj(json!({
                 "direction": s("up | down | left | right"),
-                "text": s("Scrollable node's text selector"),
-                "times": i("Repeat count (default 1)")
+                "text": s("Scroll inside the node (or its scrollable ancestor) matching this text"),
+                "times": i("Repeat count (default 1, max 10)")
             }), &["direction"]),
             Moderate, "a11y",
         ),
@@ -347,15 +351,16 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "screenshot", "Screenshot (a11y)",
-            "Screenshot via AccessibilityService (better compression control). \
-             Returns base64 image.",
+            "Screenshot via AccessibilityService (JPEG). The image is not shown to \
+             you — only its size; read the screen with ui_tree / ui_find.",
             obj(json!({}), &[]),
             Readonly, "a11y",
         ),
         t(
             "launch_intent", "Open intent / deep link",
-            "Start an activity by intent URI (deep link, settings screen).",
-            obj(json!({"uri": s("Intent URI, e.g. android-app:// or https:// or app scheme")}), &["uri"]),
+            "Start an activity by URI: deep link (https://, app scheme), `intent:` URI, \
+             or a settings action like android.settings.WIFI_SETTINGS.",
+            obj(json!({"uri": s("URI, intent: URI, or android.settings.* action")}), &["uri"]),
             Moderate, "a11y",
         ),
         // ---------- meta ----------

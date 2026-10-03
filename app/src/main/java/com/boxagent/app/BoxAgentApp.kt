@@ -33,12 +33,20 @@ class BoxAgentApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Native code (adb_client key file) uses std::env::temp_dir(), which
+        // on Android falls back to /data/local/tmp — not writable by apps.
+        // Not cacheDir: the FileProvider shares that, and the ADB private
+        // key passes through here.
+        runCatching {
+            val tmp = java.io.File(noBackupFilesDir, "tmp").apply { mkdirs() }
+            android.system.Os.setenv("TMPDIR", tmp.absolutePath, true)
+        }
         settings = Settings(this)
         secrets = Secrets(this)
         db = AppDb.get(this)
         daemon = DaemonManager(this, settings, secrets)
         toolRunner = ToolRunner(this, daemon, settings, db)
-        agent = AgentController(this, settings, secrets, toolRunner, db)
+        agent = AgentController(this, settings, secrets, toolRunner, db, daemon)
 
         LocaleHelper.init(this)
         Notifier.ensureChannel(this)
@@ -74,24 +82,32 @@ class BoxAgentApp : Application() {
         )
     }
 
-    fun onBootRestore() {
+    fun onBootRestore(done: () -> Unit = {}) {
         appScope.launch {
-            val had = daemon.reconnect() != null
-            if (had) {
-                AgentService.start(
-                    this@BoxAgentApp,
-                    getString(R.string.notif_restored_boot),
-                    wake = false,
-                )
-            } else {
-                // Wireless debugging resets on reboot on many devices —
-                // surface a repair prompt rather than silently failing.
-                Notifier.post(
-                    this@BoxAgentApp,
-                    getString(R.string.notif_attention_title),
-                    getString(R.string.notif_attention_body),
-                )
+            try {
+                restoreAfterBoot()
+            } finally {
+                done()
             }
+        }
+    }
+
+    private suspend fun restoreAfterBoot() {
+        val had = daemon.reconnect() != null
+        if (had) {
+            AgentService.start(
+                this@BoxAgentApp,
+                getString(R.string.notif_restored_boot),
+                wake = false,
+            )
+        } else {
+            // Wireless debugging resets on reboot on many devices —
+            // surface a repair prompt rather than silently failing.
+            Notifier.post(
+                this@BoxAgentApp,
+                getString(R.string.notif_attention_title),
+                getString(R.string.notif_attention_body),
+            )
         }
     }
 }

@@ -89,7 +89,8 @@ fun OnboardingScreen(app: BoxAgentApp) {
                     status = {
                         StatusPill(
                             stringResource(R.string.paired),
-                            st.shell != ShellState.OFFLINE || pairedOk,
+                            pairedOk || st.shell == ShellState.CONNECTING ||
+                                st.shell == ShellState.ONLINE,
                         )
                     },
                     content = {
@@ -104,7 +105,11 @@ fun OnboardingScreen(app: BoxAgentApp) {
                             onClick = {
                                 busy = true
                                 scope.launch {
-                                    app.daemon.pair(host, pairPort.toIntOrNull() ?: 0, pairCode)
+                                    app.daemon.pair(
+                                        host.trim(),
+                                        pairPort.trim().toIntOrNull() ?: 0,
+                                        pairCode.filter { it.isDigit() },
+                                    )
                                         .onSuccess {
                                             pairedOk = true
                                             note = ctx.getString(R.string.paired) + ": $it"
@@ -137,7 +142,10 @@ fun OnboardingScreen(app: BoxAgentApp) {
                             onClick = {
                                 busy = true
                                 scope.launch {
-                                    app.daemon.connectAndSpawn(host, connectPort.toIntOrNull() ?: 0)
+                                    app.daemon.connectAndSpawn(
+                                        host.trim(),
+                                        connectPort.trim().toIntOrNull() ?: 0,
+                                    )
                                         .onFailure { note = it.message }
                                     busy = false
                                 }

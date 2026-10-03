@@ -66,46 +66,87 @@ class A11yService : AccessibilityService() {
     fun foregroundPackage(): String =
         rootInActiveWindow?.packageName?.toString()?.ifEmpty { lastPackage } ?: lastPackage
 
+    /** Roots to search: the active window(s), else the active-window root. */
+    private fun activeRoots(): List<AccessibilityNodeInfo> =
+        windows.filter { it.isActive }.mapNotNull { it.root }
+            .ifEmpty { listOfNotNull(rootInActiveWindow) }
+
     fun dumpTree(maxDepth: Int = 30, packageFilter: String = ""): JSONObject {
-        val roots = mutableListOf<AccessibilityNodeInfo>()
-        val filtered = mutableListOf<AccessibilityNodeInfo>()
-        windows.filter { it.isActive }.forEach { w ->
-            w.root?.let { r ->
-                if (packageFilter.isEmpty() || r.packageName == packageFilter) filtered.add(r)
-                else roots.add(r)
-            }
-        }
-        val all = if (filtered.isNotEmpty()) filtered else (rootInActiveWindow?.let { listOf(it) } ?: emptyList())
+        // A package filter may name a non-active window (IME, overlay,
+        // split screen) — search all of them for it.
+        val byPkg = if (packageFilter.isEmpty()) emptyList()
+            else windows.mapNotNull { it.root }.filter { it.packageName == packageFilter }
+        val roots = byPkg.ifEmpty { activeRoots() }
+        val budget = intArrayOf(MAX_TREE_NODES)
         val arr = JSONArray()
-        all.forEach { arr.put(nodeToJson(it, 0, maxDepth)) }
+        roots.forEach { r -> nodeToJson(r, 0, maxDepth, budget).forEach(arr::put) }
         return JSONObject()
             .put("foreground", foregroundPackage())
             .put("windows", arr)
+            .apply { if (budget[0] <= 0) put("truncated", true) }
     }
 
-    private fun nodeToJson(n: AccessibilityNodeInfo, depth: Int, max: Int): JSONObject {
+    /**
+     * One node as JSON — or, for a bare layout container with no text, id
+     * or capability, its children spliced into the parent. Invisible nodes
+     * are skipped. Keeps a typical screen well inside the 8 KB tool-result
+     * cap instead of being cut off mid-JSON.
+     */
+    private fun nodeToJson(
+        n: AccessibilityNodeInfo, depth: Int, max: Int, budget: IntArray,
+    ): List<JSONObject> {
+        if (budget[0] <= 0 || (depth > 0 && !n.isVisibleToUser)) return emptyList()
+        val text = n.text?.toString()?.takeIf { it.isNotBlank() }?.take(80)
+        val desc = n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.take(80)
+        val id = n.viewIdResourceName?.substringAfterLast('/')
+        val caps = JSONArray()
+        if (n.isEnabled) {
+            if (n.isClickable) caps.put("click")
+            if (n.isScrollable) caps.put("scroll")
+            if (n.isCheckable) caps.put("check")
+            if (n.isLongClickable) caps.put("longclick")
+        }
+        if (n.isEditable) caps.put("edit")
+        val informative = depth == 0 || text != null || desc != null || id != null ||
+            caps.length() > 0
+        if (informative) budget[0]--
+
+        val kids = mutableListOf<JSONObject>()
+        if (depth < max) {
+            for (i in 0 until min(n.childCount, 50)) {
+                n.getChild(i)?.let { kids += nodeToJson(it, depth + 1, max, budget) }
+            }
+        }
+        if (!informative) return kids
+
         val o = JSONObject()
         o.put("class", n.className?.toString()?.substringAfterLast('.') ?: "")
-        n.viewIdResourceName?.let { o.put("id", it.substringAfterLast('/')) }
-        n.text?.let { o.put("text", it.toString().take(80)) }
-        n.contentDescription?.let { o.put("desc", it.toString().take(80)) }
+        id?.let { o.put("id", it) }
+        text?.let { o.put("text", it) }
+        desc?.let { o.put("desc", it) }
         val r = Rect(); n.getBoundsInScreen(r)
         o.put("bounds", "${r.left},${r.top},${r.right},${r.bottom}")
-        val caps = JSONArray()
-        if (n.isClickable) caps.put("click")
-        if (n.isScrollable) caps.put("scroll")
-        if (n.isEditable) caps.put("edit")
-        if (n.isCheckable) caps.put("check")
-        if (n.isLongClickable) caps.put("longclick")
-        if (n.isEnabled && caps.length() > 0 || n.isEditable) o.put("caps", caps)
-        if (depth < max) {
-            val kids = JSONArray()
-            for (i in 0 until min(n.childCount, 50)) {
-                n.getChild(i)?.let { kids.put(nodeToJson(it, depth + 1, max)) }
-            }
-            if (kids.length() > 0) o.put("children", kids)
+        if (caps.length() > 0) o.put("caps", caps)
+        if (n.isCheckable) o.put("checked", n.isChecked)
+        if (kids.isNotEmpty()) o.put("children", JSONArray(kids))
+        return listOf(o)
+    }
+
+    /** Selector semantics shared by ui_find / tap / wait_for: every given
+     *  field must match (AND); none given matches nothing. */
+    private class Selector(text: String?, desc: String?, resId: String?) {
+        private val textRe = pattern(text)
+        private val descRe = pattern(desc)
+        private val idRe = pattern(resId, ignoreCase = false)
+        val isEmpty get() = textRe == null && descRe == null && idRe == null
+
+        fun matches(n: AccessibilityNodeInfo): Boolean {
+            if (isEmpty) return false
+            textRe?.let { if (n.text?.toString()?.contains(it) != true) return false }
+            descRe?.let { if (n.contentDescription?.toString()?.contains(it) != true) return false }
+            idRe?.let { if (n.viewIdResourceName?.contains(it) != true) return false }
+            return true
         }
-        return o
     }
 
     fun findNodes(
@@ -115,60 +156,45 @@ class A11yService : AccessibilityService() {
         clickableOnly: Boolean,
     ): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
-        val textRe = text?.toRegex(RegexOption.IGNORE_CASE)
-        val descRe = desc?.toRegex(RegexOption.IGNORE_CASE)
-        val idRe = resId?.toRegex()
-        val roots = windows.filter { it.isActive }.mapNotNull { it.root }
-            .ifEmpty { listOfNotNull(rootInActiveWindow) }
-        fun matches(n: AccessibilityNodeInfo): Boolean {
-            if (clickableOnly && !n.isClickable) return false
-            if (textRe == null && descRe == null && idRe == null) return false
-            var ok = true
-            textRe?.let { ok = ok && (n.text?.toString()?.contains(it) == true) }
-            descRe?.let { ok = ok && (n.contentDescription?.toString()?.contains(it) == true) }
-            idRe?.let { ok = ok && (n.viewIdResourceName?.contains(it) == true) }
-            return ok
-        }
+        val sel = Selector(text, desc, resId)
         fun walk(n: AccessibilityNodeInfo) {
-            if (matches(n)) {
+            if (out.size >= 50) return
+            if (sel.matches(n) && (!clickableOnly || n.isClickable)) {
                 val r = Rect(); n.getBoundsInScreen(r)
                 out.add(JSONObject()
                     .put("text", n.text?.toString()?.take(80) ?: "")
                     .put("desc", n.contentDescription?.toString()?.take(80) ?: "")
                     .put("id", n.viewIdResourceName ?: "")
                     .put("bounds", "${r.left},${r.top},${r.right},${r.bottom}")
-                    .put("clickable", n.isClickable))
+                    .put("clickable", n.isClickable)
+                    .put("visible", n.isVisibleToUser))
             }
             for (i in 0 until min(n.childCount, 80)) n.getChild(i)?.let { walk(it) }
         }
-        roots.forEach { walk(it) }
-        return out.take(50)
+        activeRoots().forEach { walk(it) }
+        return out
     }
 
+    /** First match, preferring nodes actually on screen. */
     private fun findFirstNode(
         text: String?,
         desc: String?,
         resId: String?,
     ): AccessibilityNodeInfo? {
-        val textRe = text?.toRegex(RegexOption.IGNORE_CASE)
-        val descRe = desc?.toRegex(RegexOption.IGNORE_CASE)
-        val idRe = resId?.toRegex()
-        val roots = windows.filter { it.isActive }.mapNotNull { it.root }
-            .ifEmpty { listOfNotNull(rootInActiveWindow) }
-        var found: AccessibilityNodeInfo? = null
+        val sel = Selector(text, desc, resId)
+        if (sel.isEmpty) return null
+        var visible: AccessibilityNodeInfo? = null
+        var any: AccessibilityNodeInfo? = null
         fun walk(n: AccessibilityNodeInfo) {
-            if (found != null) return
-            var ok = textRe == null && descRe == null && idRe == null
-            textRe?.let { ok = ok || n.text?.toString()?.contains(it) == true }
-            descRe?.let { ok = ok || n.contentDescription?.toString()?.contains(it) == true }
-            idRe?.let { ok = ok || n.viewIdResourceName?.contains(it) == true }
-            if (ok && (textRe != null || descRe != null || idRe != null)) {
-                found = n; return
+            if (visible != null) return
+            if (sel.matches(n)) {
+                if (n.isVisibleToUser) { visible = n; return }
+                if (any == null) any = n
             }
             for (i in 0 until min(n.childCount, 80)) n.getChild(i)?.let { walk(it) }
         }
-        roots.forEach { walk(it) }
-        return found
+        activeRoots().forEach { walk(it) }
+        return visible ?: any
     }
 
     private fun findFirstEditable(
@@ -176,35 +202,35 @@ class A11yService : AccessibilityService() {
         desc: String?,
         resId: String?,
     ): AccessibilityNodeInfo? {
-        val roots = windows.filter { it.isActive }.mapNotNull { it.root }
-            .ifEmpty { listOfNotNull(rootInActiveWindow) }
-        val textRe = text?.toRegex(RegexOption.IGNORE_CASE)
-        val descRe = desc?.toRegex(RegexOption.IGNORE_CASE)
-        val idRe = resId?.toRegex()
+        val textRe = pattern(text)
+        val descRe = pattern(desc)
+        val idRe = pattern(resId, ignoreCase = false)
         var found: AccessibilityNodeInfo? = null
+        var focused: AccessibilityNodeInfo? = null
         var fallback: AccessibilityNodeInfo? = null
         fun walk(n: AccessibilityNodeInfo) {
             if (found != null) return
             if (n.isEditable) {
+                if (n.isFocused && focused == null) focused = n
                 if (fallback == null) fallback = n
                 val sel = (textRe != null && n.text?.toString()?.contains(textRe) == true) ||
                         (descRe != null && n.contentDescription?.toString()?.contains(descRe) == true) ||
-                        (idRe != null && n.viewIdResourceName?.contains(idRe) == true)
+                        (idRe != null && n.viewIdResourceName?.contains(idRe) == true) ||
+                        // Empty fields often expose their placeholder as hint.
+                        (textRe != null && n.hintText?.toString()?.contains(textRe) == true)
                 if (sel) { found = n; return }
             }
             for (i in 0 until min(n.childCount, 80)) n.getChild(i)?.let { walk(it) }
         }
-        roots.forEach { walk(it) }
-        return found ?: if (textRe == null && descRe == null && idRe == null) fallback else null
+        activeRoots().forEach { walk(it) }
+        return found ?: if (textRe == null && descRe == null && idRe == null) focused ?: fallback else null
     }
 
     // ------------------------------------------------------------------
     // Gestures
 
-    private suspend fun gesture(path: Path, durationMs: Long): Boolean =
+    private suspend fun dispatch(gd: GestureDescription): Boolean =
         suspendCancellableCoroutine { cont ->
-            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
-            val gd = GestureDescription.Builder().addStroke(stroke).build()
             val ok = dispatchGesture(gd, object : GestureResultCallback() {
                 override fun onCompleted(g: GestureDescription) = cont.resume(true)
                 override fun onCancelled(g: GestureDescription) = cont.resume(false)
@@ -212,14 +238,28 @@ class A11yService : AccessibilityService() {
             if (!ok) cont.resume(false)
         }
 
-    private fun nodeCenter(selector: Triple<String?, String?, String?>): Pair<Float, Float>? {
-        val node = findFirstNode(selector.first, selector.second, selector.third) ?: return null
-        val r = Rect(); node.getBoundsInScreen(r)
-        return r.exactCenterX() to r.exactCenterY()
+    /** Strokes must have non-negative coordinates and 1..max ms duration,
+     *  or dispatchGesture throws. */
+    private fun stroke(path: Path, durationMs: Long) =
+        GestureDescription.StrokeDescription(
+            path, 0, durationMs.coerceIn(1, GestureDescription.getMaxGestureDuration()),
+        )
+
+    private fun c(v: Float) = v.coerceAtLeast(0f)
+
+    private suspend fun gesture(path: Path, durationMs: Long): Boolean =
+        dispatch(GestureDescription.Builder().addStroke(stroke(path, durationMs)).build())
+
+    private fun screenSize(): Pair<Int, Int> {
+        val dm = android.util.DisplayMetrics()
+        val display = getSystemService(android.hardware.display.DisplayManager::class.java)
+            .getDisplay(Display.DEFAULT_DISPLAY)
+        @Suppress("DEPRECATION") display.getRealMetrics(dm)
+        return dm.widthPixels to dm.heightPixels
     }
 
     suspend fun tap(x: Float, y: Float): Boolean {
-        val path = Path().apply { moveTo(x, y) }
+        val path = Path().apply { moveTo(c(x), c(y)) }
         return gesture(path, 60)
     }
 
@@ -229,31 +269,41 @@ class A11yService : AccessibilityService() {
     ): Pair<Boolean, String> {
         if (text != null || desc != null || resId != null) {
             val node = findFirstNode(text, desc, resId) ?: return false to "no matching node"
-            if (node.isClickable && node.isEnabled) {
-                // Prefer semantic click — more reliable than coordinates.
-                var n: AccessibilityNodeInfo? = node
-                while (n != null && !(n.isClickable && n.isEnabled)) n = n.parent
-                if (n?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
-                    return true to "node_click"
-                }
+            // Labels are rarely clickable themselves — click the nearest
+            // clickable ancestor (bounded, so we don't hit a whole-screen
+            // container), which is more reliable than coordinates.
+            var n: AccessibilityNodeInfo? = node
+            var hops = 0
+            while (n != null && !(n.isClickable && n.isEnabled) && hops < MAX_CLICK_HOPS) {
+                n = n.parent; hops++
+            }
+            if (n != null && n.isClickable && n.isEnabled &&
+                n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            ) {
+                return true to "node_click"
             }
             val r = Rect(); node.getBoundsInScreen(r)
-            val ok = tap(r.exactCenterX(), r.exactCenterY())
-            return ok to "gesture"
+            if (r.isEmpty) return false to "node has no on-screen bounds"
+            return tap(r.exactCenterX(), r.exactCenterY()) to "gesture"
         }
         if (x != null && y != null) return tap(x, y) to "gesture"
         return false to "no target"
     }
 
-    suspend fun longPress(x: Float?, y: Float?, text: String?, desc: String?, durationMs: Long): Boolean {
-        val (cx, cy) = if (x != null && y != null) x to y
-            else nodeCenter(Triple(text, desc, null)) ?: return false
-        val path = Path().apply { moveTo(cx, cy) }
+    suspend fun longPress(
+        x: Float?, y: Float?, text: String?, desc: String?, resId: String?, durationMs: Long,
+    ): Boolean {
+        val (cx, cy) = if (x != null && y != null) x to y else {
+            val node = findFirstNode(text, desc, resId) ?: return false
+            val r = Rect(); node.getBoundsInScreen(r)
+            r.exactCenterX() to r.exactCenterY()
+        }
+        val path = Path().apply { moveTo(c(cx), c(cy)) }
         return gesture(path, durationMs)
     }
 
     suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {
-        val path = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
+        val path = Path().apply { moveTo(c(x1), c(y1)); lineTo(c(x2), c(y2)) }
         return gesture(path, durationMs)
     }
 
@@ -261,39 +311,49 @@ class A11yService : AccessibilityService() {
         val span = (percent.coerceIn(1, 100) / 100f) * 400f
         val from = if (zoomIn) 60f else span
         val to = if (zoomIn) span else 60f
-        val p1 = Path().apply { moveTo(cx - from, cy); lineTo(cx - to, cy) }
-        val p2 = Path().apply { moveTo(cx + from, cy); lineTo(cx + to, cy) }
-        return suspendCancellableCoroutine { cont ->
-            val gd = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(p1, 0, 300))
-                .addStroke(GestureDescription.StrokeDescription(p2, 0, 300))
-                .build()
-            val ok = dispatchGesture(gd, object : GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription) = cont.resume(true)
-                override fun onCancelled(g: GestureDescription) = cont.resume(false)
-            }, null)
-            if (!ok) cont.resume(false)
-        }
+        val p1 = Path().apply { moveTo(c(cx - from), c(cy)); lineTo(c(cx - to), c(cy)) }
+        val p2 = Path().apply { moveTo(c(cx + from), c(cy)); lineTo(c(cx + to), c(cy)) }
+        return dispatch(
+            GestureDescription.Builder()
+                .addStroke(stroke(p1, 300))
+                .addStroke(stroke(p2, 300))
+                .build(),
+        )
     }
 
-    suspend fun scroll(direction: String, times: Int): Boolean {
-        val dm = resources.displayMetrics
-        val w = dm.widthPixels / 2f
-        val h = dm.heightPixels / 2f
-        val d = dm.heightPixels * 0.35f
-        repeat(times) {
-            // Direction is the finger's travel direction.
-            val ok = when (direction.lowercase()) {
-                "up" -> swipe(w, h + d, w, h - d, 350)
-                "down" -> swipe(w, h - d, w, h + d, 350)
-                "left" -> swipe(w + d, h, w - d, h, 350)
-                "right" -> swipe(w - d, h, w + d, h, 350)
-                else -> false
-            }
-            if (!ok) return false
-            delay(120)
+    /**
+     * `direction` is where to move in the content: "down" reveals what is
+     * below (finger travels up), like scrolling a page. With [text], the
+     * swipe runs inside that node's nearest scrollable ancestor.
+     */
+    suspend fun scroll(direction: String, text: String?, times: Int): Pair<Boolean, String> {
+        val area = Rect()
+        if (text != null) {
+            val node = findFirstNode(text, null, null) ?: return false to "no matching node"
+            var n: AccessibilityNodeInfo? = node
+            while (n != null && !n.isScrollable) n = n.parent
+            (n ?: node).getBoundsInScreen(area)
+            if (area.isEmpty) return false to "node has no on-screen bounds"
+        } else {
+            val (w, h) = screenSize()
+            area.set(0, 0, w, h)
         }
-        return true
+        val cx = area.exactCenterX()
+        val cy = area.exactCenterY()
+        val dx = area.width() * 0.35f
+        val dy = area.height() * 0.35f
+        repeat(times.coerceIn(1, 10)) {
+            val ok = when (direction.lowercase()) {
+                "down" -> swipe(cx, cy + dy, cx, cy - dy, 350)
+                "up" -> swipe(cx, cy - dy, cx, cy + dy, 350)
+                "right" -> swipe(cx + dx, cy, cx - dx, cy, 350)
+                "left" -> swipe(cx - dx, cy, cx + dx, cy, 350)
+                else -> return false to "direction must be up, down, left or right"
+            }
+            if (!ok) return false to "gesture cancelled"
+            delay(150)
+        }
+        return true to if (text != null) "node" else "screen"
     }
 
     suspend fun typeText(text: String, selText: String?, selDesc: String?, selId: String?): Pair<Boolean, String> {
@@ -324,7 +384,8 @@ class A11yService : AccessibilityService() {
     suspend fun waitFor(
         text: String?, desc: String?, resId: String?, pkg: String?, timeoutMs: Long,
     ): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
+        if (pkg == null && text == null && desc == null && resId == null) return false
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(0, 60_000)
         while (System.currentTimeMillis() < deadline) {
             if (pkg != null && foregroundPackage() == pkg) return true
             if ((text != null || desc != null || resId != null) &&
@@ -358,6 +419,17 @@ class A11yService : AccessibilityService() {
     }
 
     companion object {
+        private const val MAX_TREE_NODES = 250
+        private const val MAX_CLICK_HOPS = 4
+
+        /** Model-supplied selector: regex when valid, else a literal —
+         *  "Settings (Beta)" or "$5" must not throw. */
+        private fun pattern(s: String?, ignoreCase: Boolean = true): Regex? {
+            if (s.isNullOrEmpty()) return null
+            val opts = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+            return runCatching { Regex(s, opts) }.getOrElse { Regex(Regex.escape(s), opts) }
+        }
+
         @Volatile var instance: A11yService? = null
             private set
         val isEnabled: Boolean get() = instance != null

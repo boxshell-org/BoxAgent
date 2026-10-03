@@ -18,9 +18,10 @@ object ModelFetcher {
 
     suspend fun list(baseUrl: String, apiKey: String): List<String> =
         withContext(Dispatchers.IO) {
-            val url = baseUrl.trimEnd('/') + "/models"
+            val url = baseUrl.trim().trimEnd('/') + "/models"
+            val key = apiKey.trim()
             val req = Request.Builder().url(url).apply {
-                if (apiKey.isNotEmpty()) header("Authorization", "Bearer $apiKey")
+                if (key.isNotEmpty()) header("Authorization", "Bearer $key")
             }.build()
             client.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}")

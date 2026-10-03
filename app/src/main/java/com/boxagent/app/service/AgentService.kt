@@ -30,8 +30,15 @@ class AgentService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
             else 0,
         )
-        if (intent?.getBooleanExtra(EXTRA_WAKE, false) == true) acquireWake()
+        // wake=false is also how a finished task hands the service back to
+        // watchdog duty — drop the task's wake lock then.
+        if (intent?.getBooleanExtra(EXTRA_WAKE, false) == true) acquireWake() else releaseWake()
         return START_STICKY
+    }
+
+    private fun releaseWake() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
     }
 
     private fun acquireWake() {
@@ -42,8 +49,7 @@ class AgentService : Service() {
     }
 
     override fun onDestroy() {
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
+        releaseWake()
         super.onDestroy()
     }
 

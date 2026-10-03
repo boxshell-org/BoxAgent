@@ -136,9 +136,13 @@ fun StatusScreen(app: BoxAgentApp) {
         PairDialog(
             onPair = { host, port, code ->
                 scope.launch {
-                    app.daemon.pair(host, port.toIntOrNull() ?: 0, code)
+                    val r = app.daemon.pair(
+                        host.trim(), port.trim().toIntOrNull() ?: 0, code.filter { it.isDigit() },
+                    )
                     showPair = false
-                    showConnect = true
+                    // Only move on to connecting when pairing worked; the
+                    // failure is shown in the detail section.
+                    showConnect = r.isSuccess
                 }
             },
             onDismiss = { showPair = false },
@@ -148,7 +152,7 @@ fun StatusScreen(app: BoxAgentApp) {
         ConnectDialog(
             onConnect = { host, port ->
                 scope.launch {
-                    app.daemon.connectAndSpawn(host, port.toIntOrNull() ?: 0)
+                    app.daemon.connectAndSpawn(host.trim(), port.trim().toIntOrNull() ?: 0)
                     showConnect = false
                 }
             },

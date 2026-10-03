@@ -128,12 +128,19 @@ where
     Ok(serde_json::from_slice(&buf)?)
 }
 
-/// Write one length-prefixed JSON frame.
+/// Write one length-prefixed JSON frame. Oversized frames are refused
+/// before anything hits the wire — the peer would reject the length and
+/// lose framing sync otherwise.
 pub async fn write_frame<W, T: Serialize>(w: &mut W, v: &T) -> Result<(), ProtoError>
 where
     W: AsyncWrite + Unpin,
 {
     let payload = serde_json::to_vec(v)?;
+    if payload.len() > MAX_FRAME as usize {
+        return Err(ProtoError::TooLarge(
+            payload.len().min(u32::MAX as usize) as u32
+        ));
+    }
     w.write_u32(payload.len() as u32).await?;
     w.write_all(&payload).await?;
     w.flush().await?;
@@ -166,6 +173,21 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_refused_without_writing() {
+        let (mut a, mut b) = tokio::io::duplex(64);
+        let big = Response::FileData {
+            id: 1,
+            data_b64: "A".repeat(MAX_FRAME as usize),
+        };
+        let err = write_frame(&mut a, &big).await.unwrap_err();
+        assert!(matches!(err, ProtoError::TooLarge(_)));
+        // Stream still in sync: the next frame reads cleanly.
+        write_frame(&mut a, &Response::Pong).await.unwrap();
+        let got: Response = read_frame(&mut b).await.unwrap();
+        assert!(matches!(got, Response::Pong));
     }
 
     #[tokio::test]

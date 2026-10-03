@@ -26,6 +26,7 @@
     <string name="chat_history">历史</string>
     <string name="chat_conv">会话 %1$s</string>
     <string name="chat_working">执行中…</string>
+    <string name="chat_stopped">已停止。</string>
     <string name="chat_assistant_asks">助手询问</string>
     <string name="chat_answer_hint">回复…</string>
     <string name="send">发送</string>

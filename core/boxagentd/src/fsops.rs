@@ -4,14 +4,31 @@ use anyhow::{Context, Result};
 use boxagent_proto::FileEntry;
 use std::os::unix::fs::MetadataExt;
 
-const MAX_READ: u64 = 32 * 1024 * 1024;
+/// Largest payload whose base64 still fits one proto frame (16 MiB) with
+/// room for the JSON envelope — bigger reads would kill the connection.
+pub const MAX_READ: u64 = 12 * 1024 * 1024 - 64 * 1024;
 
 pub fn read(path: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
     let meta = std::fs::metadata(path).with_context(|| format!("stat {path}"))?;
+    if meta.is_dir() {
+        anyhow::bail!("{path} is a directory");
+    }
     if meta.len() > MAX_READ {
         anyhow::bail!("file too large: {} bytes", meta.len());
     }
-    std::fs::read(path).with_context(|| format!("read {path}"))
+    // st_size lies for /proc, /sys and char devices (0, or endless like
+    // /dev/zero) — bound the actual read, not just the stat.
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .with_context(|| format!("open {path}"))?
+        .take(MAX_READ + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| format!("read {path}"))?;
+    if buf.len() as u64 > MAX_READ {
+        anyhow::bail!("file too large: over {MAX_READ} bytes");
+    }
+    Ok(buf)
 }
 
 pub fn write(path: &str, data: &[u8]) -> Result<()> {

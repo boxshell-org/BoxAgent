@@ -4,11 +4,14 @@ import android.content.Context
 import com.boxagent.app.R
 import com.boxagent.app.bridge.AgentCallbacks
 import com.boxagent.app.bridge.Core
+import com.boxagent.app.daemon.DaemonManager
+import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.data.Secrets
 import com.boxagent.app.data.Settings
 import com.boxagent.app.data.db.AppDb
 import com.boxagent.app.data.db.Conversation
 import com.boxagent.app.data.db.Message
+import com.boxagent.app.service.AgentService
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,13 +24,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicLong
 
+/** Immutable: results arrive as a new copy so Compose sees the change. */
 data class ToolCallUi(
     val id: String,
     val name: String,
     val args: String,
-    var result: String? = null,
-    var durationMs: Long = 0,
+    val result: String? = null,
+    val durationMs: Long = 0,
 )
 
 data class ChatMsg(
@@ -66,6 +71,7 @@ class AgentController(
     private val secrets: Secrets,
     private val toolRunner: ToolRunner,
     private val db: AppDb,
+    private val daemon: DaemonManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -73,10 +79,12 @@ class AgentController(
     val state: StateFlow<AgentState> = _state
 
     @Volatile private var agentHandle: Long = -1
-    private var msgCounter = 0L
-    private var pendingToolCalls = mutableMapOf<String, ToolCallUi>()
-    private var assistantBuf = StringBuilder()
+    /** UI ids for LazyColumn keys — one sequence for live AND loaded rows. */
+    private val msgCounter = AtomicLong(0)
+    private val assistantBuf = StringBuilder()
     private val callbacks = Callbacks()
+
+    private fun nextId() = msgCounter.incrementAndGet()
 
     fun newConversation() {
         if (_state.value.running) return
@@ -89,23 +97,46 @@ class AgentController(
         _state.update {
             it.copy(
                 conversationId = id,
+                error = null,
                 messages = msgs.map { m ->
-                    ChatMsg(id = m.id, role = m.role, text = m.content)
+                    // DB row ids would collide with live ids as list keys.
+                    ChatMsg(id = nextId(), role = m.role, text = m.content)
                 },
             )
         }
     }
 
     fun send(prompt: String) {
-        if (_state.value.running || prompt.isBlank()) return
-        val secretsApiKey = secrets.apiKey
-        if (secretsApiKey.isEmpty()) {
+        if (prompt.isBlank()) return
+        val apiKey = secrets.apiKey
+        if (apiKey.isEmpty()) {
             _state.update {
                 it.copy(error = context.getString(R.string.error_no_api_key))
             }
             return
         }
-        scope.launch { startRun(prompt, secretsApiKey) }
+        // Claim the run synchronously so a double tap can't start two.
+        var claimed = false
+        _state.update {
+            if (it.running) it
+            else {
+                claimed = true
+                it.copy(running = true, error = null)
+            }
+        }
+        if (!claimed) return
+        scope.launch {
+            runCatching { startRun(prompt, apiKey) }.onFailure { e ->
+                _state.update {
+                    it.copy(
+                        running = false,
+                        error = e.message ?: context.getString(R.string.error_agent_start),
+                    )
+                }
+                agentHandle = -1
+                idleService()
+            }
+        }
     }
 
     private suspend fun startRun(prompt: String, apiKey: String) {
@@ -117,9 +148,11 @@ class AgentController(
             )
         }
         toolRunner.conversationId = convId
+        // History first: the prompt itself is sent separately by the core —
+        // reading after the insert would send it twice.
+        val history = historyJson(convId)
         db.messages().insert(Message(conversationId = convId, role = "user", content = prompt))
 
-        val history = historyJson(convId)
         val config = JSONObject()
             .put("base_url", settings.baseUrl.first())
             .put("api_key", apiKey)
@@ -136,16 +169,15 @@ class AgentController(
             .put("prompt_cache_key", "boxagent-c$convId")
             .put("compact_tools", settings.compactTools.first())
 
-        assistantBuf = StringBuilder()
-        pendingToolCalls.clear()
+        synchronized(assistantBuf) { assistantBuf.setLength(0) }
         _state.update {
             it.copy(
                 running = true, conversationId = convId, steps = 0, error = null,
-                messages = it.messages + ChatMsg(++msgCounter, "user", prompt),
+                messages = it.messages + ChatMsg(nextId(), "user", prompt),
                 currentAssistantText = "",
             )
         }
-        com.boxagent.app.service.AgentService.start(
+        AgentService.start(
             context,
             context.getString(R.string.notif_running_task),
         )
@@ -155,6 +187,7 @@ class AgentController(
             _state.update {
                 it.copy(running = false, error = context.getString(R.string.error_agent_start))
             }
+            idleService()
         }
     }
 
@@ -176,6 +209,11 @@ class AgentController(
     fun cancel() {
         val h = agentHandle
         if (h >= 0) Core.nativeCancel(h)
+        // The agent thread may be parked on the user — release it so the
+        // cancel flag is seen right away instead of never.
+        _state.value.pendingAsk?.answer?.complete("")
+        _state.update { it.copy(pendingAsk = null) }
+        toolRunner.cancelPending()
     }
 
     fun answerAsk(text: String) {
@@ -184,50 +222,69 @@ class AgentController(
     }
 
     private fun appendAssistantDelta(delta: String) {
-        assistantBuf.append(delta)
-        _state.update { it.copy(currentAssistantText = assistantBuf.toString()) }
+        val text = synchronized(assistantBuf) { assistantBuf.append(delta).toString() }
+        _state.update { it.copy(currentAssistantText = text) }
     }
 
-    private fun flushAssistant(final: Boolean = false) {
-        val text = assistantBuf.toString()
-        if (text.isEmpty()) return
+    /** Move streamed text into the message list as a finished row. */
+    private fun flushAssistant() {
+        val text = synchronized(assistantBuf) {
+            assistantBuf.toString().also { assistantBuf.setLength(0) }
+        }
         _state.update {
             it.copy(
                 currentAssistantText = "",
-                messages = it.messages + ChatMsg(++msgCounter, "assistant", text, streaming = !final),
+                messages = if (text.isEmpty()) it.messages
+                    else it.messages + ChatMsg(nextId(), "assistant", text),
             )
         }
-        assistantBuf = StringBuilder()
     }
 
-    private fun endRun(finalText: String?, error: String?) {
+    private fun endRun(finalText: String?) {
         val convId = _state.value.conversationId
+        agentHandle = -1
         scope.launch {
             if (!finalText.isNullOrEmpty() && convId > 0) {
                 db.messages().insert(
                     Message(conversationId = convId, role = "assistant", content = finalText),
                 )
-                db.conversations().touch(convId, finalText.take(48))
+                // Keep the prompt-derived title; just bump recency.
+                db.conversations().bump(convId)
             }
-            com.boxagent.app.service.AgentService.stop(context)
+            idleService()
         }
-        agentHandle = -1
+    }
+
+    /** After a run: hand the FGS back to watchdog duty, or stop it. */
+    private suspend fun idleService() {
+        val watchdog = runCatching { settings.keepWatchdog.first() }.getOrDefault(false)
+        if (watchdog && daemon.status.value.shell == ShellState.ONLINE) {
+            AgentService.start(
+                context,
+                context.getString(R.string.notif_watchdog_active),
+                wake = false,
+            )
+        } else {
+            AgentService.stop(context)
+        }
     }
 
     private inner class Callbacks : AgentCallbacks {
         override fun onEvent(json: String) {
-            val e = JSONObject(json)
+            val e = runCatching { JSONObject(json) }.getOrNull() ?: return
             when (e.optString("type")) {
                 "text_delta" -> appendAssistantDelta(e.optString("text"))
                 "assistant_text" -> {
-                    // non-streamed assistant text accompanying tool calls
+                    // Text accompanying tool calls: already streamed, or (on
+                    // non-streaming servers) only delivered here.
+                    val streamed = synchronized(assistantBuf) { assistantBuf.isNotEmpty() }
                     val t = e.optString("text")
-                    if (t.isNotEmpty() && assistantBuf.isEmpty()) {
+                    if (streamed) flushAssistant()
+                    else if (t.isNotEmpty()) {
                         _state.update {
-                            it.copy(messages = it.messages +
-                                ChatMsg(++msgCounter, "assistant", t))
+                            it.copy(messages = it.messages + ChatMsg(nextId(), "assistant", t))
                         }
-                    } else flushAssistant()
+                    }
                 }
                 "tool_call" -> {
                     flushAssistant()
@@ -236,37 +293,61 @@ class AgentController(
                         name = e.optString("name"),
                         args = e.optString("args"),
                     )
-                    pendingToolCalls[call.id] = call
                     _state.update {
-                        it.copy(
-                            steps = it.steps + 1,
-                            messages = it.messages + ChatMsg(
-                                ++msgCounter, "tool", call.name,
-                                toolCalls = it.messages.lastOrNull { m -> m.role == "tool" }
-                                    ?.toolCalls.orEmpty() + call,
-                            ),
-                        )
+                        val last = it.messages.lastOrNull()
+                        // Consecutive calls share one card group.
+                        val msgs = if (last != null && last.role == "tool") {
+                            it.messages.dropLast(1) +
+                                last.copy(toolCalls = last.toolCalls + call)
+                        } else {
+                            it.messages + ChatMsg(nextId(), "tool", call.name, toolCalls = listOf(call))
+                        }
+                        it.copy(steps = it.steps + 1, messages = msgs)
                     }
                 }
                 "tool_result" -> {
                     val id = e.optString("id")
-                    pendingToolCalls[id]?.let { c ->
-                        c.result = e.optString("result")
-                        c.durationMs = e.optLong("duration_ms")
+                    val result = e.optString("result")
+                    val dur = e.optLong("duration_ms")
+                    _state.update {
+                        it.copy(messages = it.messages.map { m ->
+                            if (m.role != "tool" || m.toolCalls.none { c -> c.id == id }) m
+                            else m.copy(toolCalls = m.toolCalls.map { c ->
+                                if (c.id == id) c.copy(result = result, durationMs = dur) else c
+                            })
+                        })
                     }
-                    _state.update { it.copy(messages = it.messages.toList()) }
                 }
                 "done" -> {
                     val text = e.optString("text")
-                    flushAssistant(final = true)
-                    _state.update { it.copy(running = false) }
-                    endRun(text.ifEmpty { assistantBuf.toString() }, null)
+                    flushAssistant()
+                    _state.update {
+                        // task_done's summary was never streamed — show it.
+                        val lastAssistant = it.messages.lastOrNull { m -> m.role == "assistant" }
+                        val msgs = if (text.isNotEmpty() && lastAssistant?.text != text) {
+                            it.messages + ChatMsg(nextId(), "assistant", text)
+                        } else it.messages
+                        it.copy(running = false, pendingAsk = null, messages = msgs)
+                    }
+                    endRun(text)
                 }
                 "error" -> {
                     val msg = e.optString("message")
                     flushAssistant()
-                    _state.update { it.copy(running = false, error = msg) }
-                    endRun(null, msg)
+                    toolRunner.cancelPending()
+                    _state.update {
+                        if (msg == "cancelled") {
+                            it.copy(
+                                running = false, pendingAsk = null,
+                                messages = it.messages + ChatMsg(
+                                    nextId(), "system", context.getString(R.string.chat_stopped),
+                                ),
+                            )
+                        } else {
+                            it.copy(running = false, pendingAsk = null, error = msg)
+                        }
+                    }
+                    endRun(null)
                 }
                 "usage" -> {
                     val u = e.optJSONObject("usage") ?: return
@@ -284,7 +365,7 @@ class AgentController(
                 "warn" -> {
                     _state.update {
                         it.copy(messages = it.messages +
-                            ChatMsg(++msgCounter, "system", e.optString("message")))
+                            ChatMsg(nextId(), "system", e.optString("message")))
                     }
                 }
             }

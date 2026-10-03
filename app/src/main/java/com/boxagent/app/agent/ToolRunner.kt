@@ -47,7 +47,9 @@ class ToolRunner(
     val pending: StateFlow<PendingConfirm?> = _pending
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val alwaysAllowed = mutableSetOf<String>()
+    // Written from the UI thread, read from the agent's Rust thread.
+    private val alwaysAllowed: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
     @Volatile var conversationId: Long = 0
 
     /** UI entry point: user approves/declines the current confirmation. */
@@ -56,6 +58,12 @@ class ToolRunner(
             if (always && approved) alwaysAllowed.add(p.tool)
             p.answer.complete(approved)
         }
+        _pending.value = null
+    }
+
+    /** Agent stopped: deny whatever is waiting so its thread can unwind. */
+    fun cancelPending() {
+        _pending.value?.answer?.complete(false)
         _pending.value = null
     }
 
@@ -81,7 +89,7 @@ class ToolRunner(
 
         if (needsConfirm(name)) {
             val approved = awaitConfirm(name, argsJson)
-            ioScope.launch { audit("tool_call", "$name denied=$approved args=redacted", approved) }
+            ioScope.launch { audit("tool_call", "$name approved=$approved args=redacted", approved) }
             if (!approved) {
                 ioScope.launch { record(name, argsJson, "denied", false, start) }
                 return JSONObject().put("ok", false).put("error", "user denied").toString()
@@ -119,7 +127,10 @@ class ToolRunner(
                 ok()
             }
             // -------- shell backend ----------
-            "shell_exec" -> shellExec(a.getString("cmd"), a.optLong("timeout_ms", 30_000))
+            "shell_exec" -> shellExec(
+                a.getString("cmd"),
+                a.optLong("timeout_ms", 30_000).coerceIn(1_000, 120_000),
+            )
             "app_list" -> runCatching {
                 // Direct PackageManager read — the `pm` CLI costs a JVM spawn.
                 val pm = context.packageManager
@@ -140,52 +151,60 @@ class ToolRunner(
                     }
                 ok().put("count", arr.length()).put("apps", arr)
             }.getOrElse { err(it) }
-            "app_launch" -> runCatching {
-                val pkg = a.getString("package")
-                val comp = a.optString("component")
-                val intent = if (comp.isNotEmpty()) {
-                    val cls = when {
-                        comp.startsWith(".") -> pkg + comp
-                        comp.contains(".") -> comp
-                        else -> "$pkg.$comp"
-                    }
-                    Intent().setComponent(android.content.ComponentName(pkg, cls))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                } else {
-                    context.packageManager.getLaunchIntentForPackage(pkg)
-                        ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        ?: throw IllegalStateException("no launcher activity for $pkg")
+            "app_launch" -> {
+                // Accept "pkg", "pkg/.Act" in package, or a separate component
+                // (".Act", "full.Cls" or "pkg/.Act").
+                var pkg = a.getString("package").trim()
+                var comp = a.optString("component").trim()
+                if (pkg.contains('/')) {
+                    if (comp.isEmpty()) comp = pkg
+                    pkg = pkg.substringBefore('/')
                 }
-                context.startActivity(intent)
-                ok()
-            }.getOrElse { e ->
-                // Shell uid can still reach non-exported components and
-                // leanback-only launchers that PackageManager can't see.
-                val comp = a.optString("component")
-                if (comp.isNotEmpty()) {
-                    val spec = if (comp.contains("/")) comp
-                        else "${a.getString("package")}/$comp"
-                    shellExec("am start -n $spec")
-                } else {
-                    shellExec(
-                        "monkey -p ${a.getString("package")}" +
-                            " -c android.intent.category.LAUNCHER 1",
-                    )
+                val compPkg = if (comp.contains('/')) comp.substringBefore('/') else pkg
+                val clsPart = comp.substringAfter('/')
+                val cls = when {
+                    clsPart.startsWith(".") -> compPkg + clsPart
+                    clsPart.contains(".") -> clsPart
+                    else -> "$compPkg.$clsPart"
+                }
+                runCatching {
+                    val intent = if (comp.isNotEmpty()) {
+                        Intent().setComponent(android.content.ComponentName(compPkg, cls))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    } else {
+                        context.packageManager.getLaunchIntentForPackage(pkg)
+                            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            ?: throw IllegalStateException("no launcher activity for $pkg")
+                    }
+                    context.startActivity(intent)
+                    ok()
+                }.getOrElse {
+                    // Shell uid can still reach non-exported components and
+                    // leanback-only launchers that PackageManager can't see.
+                    if (comp.isNotEmpty()) shellExec("am start -n ${sq("$compPkg/$cls")}")
+                    else shellExec("monkey -p ${sq(pkg)} -c android.intent.category.LAUNCHER 1")
                 }
             }
-            "app_stop" -> shellExec("am force-stop ${a.getString("package")}")
+            "app_stop" -> shellExec("am force-stop ${sq(a.getString("package"))}")
             "app_install" -> shellExec(
-                "pm install ${if (a.optBoolean("replace", true)) "-r" else ""} ${a.getString("path")}"
+                "pm install ${if (a.optBoolean("replace", true)) "-r " else ""}${sq(a.getString("path"))}"
             )
-            "app_uninstall" -> shellExec("pm uninstall ${a.getString("package")}")
-            "app_clear_data" -> shellExec("pm clear ${a.getString("package")}")
+            "app_uninstall" -> shellExec("pm uninstall ${sq(a.getString("package"))}")
+            "app_clear_data" -> shellExec("pm clear ${sq(a.getString("package"))}")
             "screen_capture" -> screencapResult()
             "screen_info" -> runCatching {
-                val dm = context.resources.displayMetrics
-                ok().put("width", dm.widthPixels)
-                    .put("height", dm.heightPixels)
-                    .put("density_dpi", dm.densityDpi)
-                    .put("density", dm.density.toDouble())
+                // Real size incl. system bars — the coordinate space gestures
+                // use. App displayMetrics exclude the bars and ignore rotation.
+                val dmgr = context.getSystemService(Context.DISPLAY_SERVICE)
+                    as android.hardware.display.DisplayManager
+                val display = dmgr.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+                val real = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION") display.getRealMetrics(real)
+                ok().put("width", real.widthPixels)
+                    .put("height", real.heightPixels)
+                    .put("density_dpi", real.densityDpi)
+                    .put("density", real.density.toDouble())
+                    .put("rotation", display.rotation * 90)
             }.getOrElse { err(it) }
             "device_info" -> runCatching {
                 val bm = context.getSystemService(Context.BATTERY_SERVICE)
@@ -221,9 +240,11 @@ class ToolRunner(
                 ok().put("value", v ?: JSONObject.NULL)
             }.getOrElse {
                 // Some keys need shell-level read — fall back to the daemon.
-                shellExec("settings get ${a.getString("namespace")} ${a.getString("key")}")
+                shellExec("settings get ${settingsNs(a)} ${sq(a.getString("key"))}")
             }
-            "settings_put" -> shellExec("settings put ${a.getString("namespace")} ${a.getString("key")} ${a.getString("value")}")
+            "settings_put" -> shellExec(
+                "settings put ${settingsNs(a)} ${sq(a.getString("key"))} ${sq(a.getString("value"))}"
+            )
             "file_read" -> runCatching {
                 val bytes = daemon.requireClient().fileRead(a.getString("path"))
                 val asText = runCatching { String(bytes, Charsets.UTF_8) }
@@ -232,6 +253,7 @@ class ToolRunner(
                     // Text is far cheaper (and readable) for the LLM than b64.
                     ok().put("size", bytes.size)
                         .put("text", asText.take(4000))
+                        .put("truncated", asText.length > 4000)
                 } else {
                     ok().put("size", bytes.size)
                         .put("mime", "application/octet-stream")
@@ -273,15 +295,14 @@ class ToolRunner(
                 if (!wrote) throw IllegalStateException("denied")
                 ok()
             }.getOrElse {
-                shellExec(
-                    "cmd clipboard set '${a.getString("text").replace("'", "'\\''")}'")
+                shellExec("cmd clipboard set ${sq(a.getString("text"))}")
             }
             "input_tap" -> shellExec("input tap ${a.getInt("x")} ${a.getInt("y")}")
             "input_swipe" -> shellExec(
                 "input swipe ${a.getInt("x1")} ${a.getInt("y1")} ${a.getInt("x2")} ${a.getInt("y2")} ${a.optInt("duration_ms", 300)}"
             )
-            "input_text" -> shellExec("input text '${a.getString("text").replace("'", "'\\''").replace(" ", "%s")}'")
-            "input_key" -> shellExec("input keyevent ${a.getString("key")}")
+            "input_text" -> shellExec("input text ${sq(a.getString("text").replace(" ", "%s"))}")
+            "input_key" -> shellExec("input keyevent ${sq(a.getString("key"))}")
             // -------- a11y backend ----------
             "ui_tree" -> a11y {
                 it.dumpTree(a.optInt("max_depth", 30), a.optString("package"))
@@ -304,7 +325,7 @@ class ToolRunner(
             "long_press" -> a11y {
                 val ok_ = it.longPress(
                     a.optDoubleOrNull("x")?.toFloat(), a.optDoubleOrNull("y")?.toFloat(),
-                    a.optStr("text"), a.optStr("desc"),
+                    a.optStr("text"), a.optStr("desc"), a.optStr("resource_id"),
                     a.optLong("duration_ms", 800),
                 )
                 JSONObject().put("ok", ok_)
@@ -326,8 +347,10 @@ class ToolRunner(
                 JSONObject().put("ok", ok_)
             }
             "scroll" -> a11y {
-                val ok_ = it.scroll(a.getString("direction"), a.optInt("times", 1))
-                JSONObject().put("ok", ok_)
+                val (ok_, via) = it.scroll(
+                    a.getString("direction"), a.optStr("text"), a.optInt("times", 1),
+                )
+                JSONObject().put("ok", ok_).put("via", via)
             }
             "type_text" -> a11y {
                 val (ok_, via) = it.typeText(
@@ -357,12 +380,10 @@ class ToolRunner(
                         .put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
                 }
             }
-            "launch_intent" -> {
-                val i = Intent(Intent.ACTION_VIEW, Uri.parse(a.getString("uri")))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(i)
+            "launch_intent" -> runCatching {
+                context.startActivity(intentFor(a.getString("uri").trim()))
                 ok()
-            }
+            }.getOrElse { err(it) }
             else -> err(UnsupportedOperationException("unknown tool: $name"))
         }
     }
@@ -379,6 +400,31 @@ class ToolRunner(
         return withContext(Dispatchers.Default) { block(svc) }
     }
 
+    /**
+     * Intent for `launch_intent`: `intent:`/`android-app:` URIs, bare
+     * actions (android.settings.WIFI_SETTINGS), or ACTION_VIEW on a URI.
+     * The URI comes from the model (and so possibly from screen content):
+     * strip URI-grant flags, selector and clip data so it can't hand our
+     * FileProvider's files to another app.
+     */
+    private fun intentFor(uri: String): Intent {
+        val i = when {
+            uri.startsWith("intent:") || uri.startsWith("android-app:") ->
+                Intent.parseUri(uri, Intent.URI_INTENT_SCHEME or Intent.URI_ANDROID_APP_SCHEME)
+            ACTION_RE.matches(uri) -> Intent(uri)
+            else -> Intent(Intent.ACTION_VIEW, Uri.parse(uri))
+        }
+        i.selector = null
+        i.clipData = null
+        i.flags = i.flags and GRANT_FLAGS.inv()
+        return i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    private fun settingsNs(a: JSONObject): String =
+        a.getString("namespace").trim().lowercase().also {
+            require(it in SETTINGS_NAMESPACES) { "namespace must be system, secure or global" }
+        }
+
     private suspend fun shellExec(cmd: String, timeout: Long = 30_000): JSONObject {
         val r: ExecResult = daemon.requireClient().exec(cmd, timeout)
         return ok()
@@ -394,6 +440,18 @@ class ToolRunner(
         ok().put("mime", "image/png")
             .put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
     }.getOrElse { err(it) }
+
+    private companion object {
+        val SETTINGS_NAMESPACES = setOf("system", "secure", "global")
+        val ACTION_RE = Regex("""^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*\.[A-Z][A-Z0-9_]*$""")
+        const val GRANT_FLAGS = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+            Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+
+        /** POSIX single-quote for `sh -c`: model-supplied args stay one word. */
+        fun sq(s: String): String = "'" + s.replace("'", "'\\''") + "'"
+    }
 
     private fun ok() = JSONObject().put("ok", true)
     private fun err(e: Throwable) =

@@ -119,11 +119,23 @@ class DaemonManager(
                 if (cli != null) return@repeat
                 delay(400)
             }
-            cli ?: throw lastErr ?: IllegalStateException("socket connect failed")
+            if (cli == null) {
+                // The spawn "succeeded" but nothing is listening: the daemon
+                // died on start. Its log says why (bad arch, noexec, bind).
+                val log = runCatching {
+                    JSONObject(Core.nativeAdbShell(pem, host, port, "tail -n 5 $LOG_PATH"))
+                        .optJSONObject("data")?.optString("output")?.trim()
+                }.getOrNull()
+                val base = lastErr?.message ?: "socket connect failed"
+                throw IllegalStateException(
+                    if (log.isNullOrEmpty()) base else "$base — daemon log: $log",
+                )
+            }
 
             secrets.daemonToken = token
             settings.setDaemonSocket(socket)
             settings.setAdbEndpoint(host, port)
+            client?.close()
             client = cli
             _status.value = DaemonStatus(
                 ShellState.ONLINE,
@@ -144,6 +156,11 @@ class DaemonManager(
      *  auth_ok carries its build version — respawn on mismatch so the wire
      *  protocol can't drift between app and daemon. */
     suspend fun reconnect(): DaemonClient? = lock.withLock {
+        // Already healthy: keep it (a second connection would leak the
+        // first, possibly mid-exec for the agent).
+        client?.takeIf { it.isAlive }?.let { if (it.ping()) return@withLock it }
+        client?.close()
+        client = null
         val socket = settings.daemonSocket.first()
         val token = secrets.daemonToken
         if (socket.isEmpty() || token.isEmpty()) return@withLock null
@@ -210,14 +227,31 @@ class DaemonManager(
         }
     }
 
+    /**
+     * The daemon ships as lib/<abi>/libboxagentd.so. With uncompressed
+     * native libs (extractNativeLibs=false, our packaging) the installer
+     * never unpacks it into nativeLibraryDir — read it straight out of the
+     * APK (base or config split). It is only pushed over ADB, never run here.
+     */
     private fun daemonBinary(): ByteArray {
-        val libDir = java.io.File(context.applicationInfo.nativeLibraryDir)
-        val f = java.io.File(libDir, "libboxagentd.so")
-        check(f.exists()) { "daemon binary missing from nativeLibraryDir" }
-        return f.readBytes()
+        val name = "libboxagentd.so"
+        val info = context.applicationInfo
+        java.io.File(info.nativeLibraryDir, name).takeIf { it.isFile }?.let { return it.readBytes() }
+        val apks = listOf(info.sourceDir) + info.splitSourceDirs.orEmpty()
+        for (abi in android.os.Build.SUPPORTED_ABIS) {
+            for (apk in apks) {
+                java.util.zip.ZipFile(apk).use { z ->
+                    z.getEntry("lib/$abi/$name")?.let { e ->
+                        return z.getInputStream(e).use { it.readBytes() }
+                    }
+                }
+            }
+        }
+        error("daemon binary missing for ${android.os.Build.SUPPORTED_ABIS.joinToString()}")
     }
 
     companion object {
         const val REMOTE_PATH = "/data/local/tmp/boxagentd"
+        const val LOG_PATH = "/data/local/tmp/boxagentd.log"
     }
 }

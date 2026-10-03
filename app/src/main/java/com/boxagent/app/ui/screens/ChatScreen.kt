@@ -419,6 +419,7 @@ private fun TypingDots() {
 private fun ToolCallsColumn(msg: ChatMsg) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         msg.toolCalls.forEach { call ->
+          androidx.compose.runtime.key(call.id) {
             var expanded by remember { mutableStateOf(false) }
             Surface(
                 shape = BwShape.Utility,
@@ -457,6 +458,7 @@ private fun ToolCallsColumn(msg: ChatMsg) {
                     }
                 }
             }
+          }
         }
     }
 }

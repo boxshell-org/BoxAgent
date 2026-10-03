@@ -15,7 +15,9 @@ cd "$(dirname "$0")/../core"
 # fall back to the latest git tag so both paths stay consistent.
 if [ -z "${BOXAGENT_APP_VERSION:-}" ]; then
     BOXAGENT_APP_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
-    BOXAGENT_APP_VERSION="${BOXAGENT_APP_VERSION:-dev}"
+    # Same fallback as app/build.gradle.kts, or the app sees a version
+    # mismatch on every reconnect and respawns the daemon.
+    BOXAGENT_APP_VERSION="${BOXAGENT_APP_VERSION:-0.1.0-dev}"
 fi
 export BOXAGENT_APP_VERSION
 
@@ -29,8 +31,9 @@ for abi in "${ABIS[@]}"; do
     t="${TRIPLE[$abi]}"
     mkdir -p "$JNILIBS/$abi"
     cp "target/$t/release/boxagentd" "$JNILIBS/$abi/libboxagentd.so"
-    # daemon must be executable inside the APK staging dir; aapt preserves the
-    # bit into the installed native lib dir, and we chmod again after push.
+    # The app reads these bytes out of the APK and pushes them over ADB
+    # (native libs are stored uncompressed and never extracted); the spawn
+    # command chmods the pushed copy.
     chmod 755 "$JNILIBS/$abi/libboxagentd.so"
 done
 echo "rust build done -> $JNILIBS"
