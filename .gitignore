@@ -9,7 +9,6 @@ local.properties
 # Rust
 target/
 **/target/
-Cargo.lock
 
 # Native libs produced by cargo-ndk
 app/src/main/jniLibs/
