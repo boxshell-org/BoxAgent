@@ -3,6 +3,7 @@ package com.boxagent.vscreen;
 import android.hardware.input.InputManager;
 import android.net.LocalServerSocket;
 import android.net.LocalSocket;
+import android.net.LocalSocketAddress;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
@@ -68,6 +69,28 @@ public final class Main {
         final String tok = token;
         Workarounds.prepare();
 
+        // Shell can't enumerate our process (restricted /proc view), so
+        // the manager stops us through this pid file instead of pkill.
+        try {
+            java.nio.file.Files.write(
+                    new java.io.File("/data/local/tmp/boxagent-vscreen.pid").toPath(),
+                    String.valueOf(android.os.Process.myPid()).getBytes());
+        } catch (Throwable t) {
+            log("pid file: " + t);
+        }
+
+        // Abstract socket names are not exclusive on Linux — a second
+        // instance would bind the same name and split the client pool.
+        // Refuse to start while another host still answers.
+        try {
+            LocalSocket probe = new LocalSocket();
+            probe.connect(new LocalSocketAddress(socket, LocalSocketAddress.Namespace.ABSTRACT));
+            probe.close();
+            log("another host is already listening — exiting");
+            return;
+        } catch (Throwable ignored) {
+        }
+
         LocalServerSocket server = new LocalServerSocket(socket);
         log("vscreen host up on " + socket);
         try {
@@ -127,7 +150,11 @@ public final class Main {
                 return ok().put("display_id", ensureDisplay(w, h, dpi));
             }
             case "destroy":
-                new Thread(() -> { sleep(150); System.exit(0); }).start();
+                new Thread(() -> {
+                    sleep(150); // let the reply reach the client first
+                    destroyDisplay(); // kills our tasks, releases the display
+                    System.exit(0);
+                }).start();
                 return ok();
             case "tap":
                 requireDisplay();
@@ -224,13 +251,14 @@ public final class Main {
 
         Class<?> dmCls = Class.forName("android.hardware.display.DisplayManager");
         int flags = vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_PUBLIC")
-                | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY")
                 | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH")
                 | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_SUPPORT_TOUCH")
                 | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_OWN_FOCUS");
-        // TRUSTED / OWN_DISPLAY_GROUP / ALWAYS_UNLOCKED excluded — each needs
-        // an internal permission shell uid does not hold. The display joins
-        // the default display group, unlocked.
+        // TRUSTED / OWN_DISPLAY_GROUP / ALWAYS_UNLOCKED excluded — each
+        // needs an internal permission shell uid does not hold (server-
+        // side check in DMS). OWN_CONTENT_ONLY is also out: it makes WMS
+        // hide the display's windows from accessibility services, and
+        // without a11y windows the agent can't see or act here.
         log("vd flags=0x" + Integer.toHexString(flags));
 
         Class<?> builderCls = Class.forName("android.hardware.display.VirtualDisplayConfig$Builder");
@@ -313,6 +341,8 @@ public final class Main {
     }
 
     private static synchronized void destroyDisplay() {
+        int id = displayId;
+        if (id >= 0) removeTasksOnDisplay(id);
         if (vdObject != null) {
             try {
                 vdObject.getClass().getMethod("release").invoke(vdObject);
@@ -323,6 +353,74 @@ public final class Main {
         lastPng = null;
         if (sinkSurface != null) try { sinkSurface.release(); } catch (Throwable ignored) {}
         if (imageReader != null) try { imageReader.close(); } catch (Throwable ignored) {}
+    }
+
+    /**
+     * Destroying a display while its tasks live migrates them onto the
+     * default display — the agent's apps would spill onto the user's
+     * screen. Force-stop the packages whose tasks sit on this display
+     * first instead. Task data comes from `dumpsys activity activities`:
+     * the IActivityTaskManager binder exposes no getTasks to reflect.
+     */
+    private static void removeTasksOnDisplay(int displayId) {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{
+                    "/system/bin/sh", "-c", "dumpsys activity activities"});
+            String dump = new String(p.getInputStream().readAllBytes());
+            p.waitFor();
+            // Collect package candidates from the display's section:
+            // component forms `I=com.pkg/.Cls` and `ActivityRecord{... pkg/.Cls}`
+            // are exact; `A=uid:affinity` may carry a task-affinity suffix.
+            java.util.Set<String> cands = new java.util.HashSet<>();
+            java.util.regex.Matcher comp = java.util.regex.Pattern
+                    .compile("(?:I=|ActivityRecord\\{[^\\n]*? u\\d+ )([\\w.]+)/")
+                    .matcher("");
+            java.util.regex.Matcher aff = java.util.regex.Pattern
+                    .compile("A=\\d+:([\\w.]+)").matcher("");
+            boolean onDisplay = false;
+            for (String line : dump.split("\n")) {
+                // Display sections and top-level dump headings sit at col 0;
+                // everything inside a display's block is indented. Trailing
+                // recap lines (mFocusedApp etc.) live outside — ignore them.
+                if (!line.isEmpty() && !Character.isWhitespace(line.charAt(0))) {
+                    onDisplay = line.contains("Display #" + displayId + " ");
+                }
+                if (!onDisplay) continue;
+                comp.reset(line);
+                while (comp.find()) cands.add(comp.group(1));
+                aff.reset(line);
+                while (aff.find()) cands.add(aff.group(1));
+            }
+            java.util.Set<String> pkgs = new java.util.HashSet<>();
+            for (String cand : cands) {
+                String pkg = resolvePackage(cand);
+                if (pkg != null && !pkg.startsWith("com.boxagent.")) pkgs.add(pkg);
+            }
+            for (String pkg : pkgs) {
+                log("force-stop " + pkg + " (display " + displayId + " teardown)");
+                try {
+                    Runtime.getRuntime().exec(new String[]{
+                            "/system/bin/sh", "-c", "am force-stop " + pkg})
+                            .waitFor();
+                } catch (Throwable ignored) {}
+            }
+        } catch (Throwable t) {
+            log("removeTasksOnDisplay failed: " + t);
+        }
+    }
+
+    /** `pm path` probe: shrink an affinity-ish candidate to a real package. */
+    private static String resolvePackage(String cand) {
+        for (String s = cand; s != null && s.contains("."); s = s.substring(0, s.lastIndexOf('.'))) {
+            try {
+                Process p = Runtime.getRuntime().exec(new String[]{
+                        "/system/bin/sh", "-c", "pm path " + s});
+                String out = new String(p.getInputStream().readAllBytes());
+                p.waitFor();
+                if (out.contains("package:")) return s;
+            } catch (Throwable ignored) {}
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------
@@ -553,6 +651,22 @@ public final class Main {
         @Override public String getPackageName() { return "com.android.shell"; }
         @Override public String getOpPackageName() { return "com.android.shell"; }
         @Override public String getAttributionTag() { return null; }
+        @Override public int getDeviceId() { return 0; }
+        // Flag validation for trusted displays calls these on our context —
+        // the authoritative check happens server-side against our binder
+        // uid (shell), so answering granted locally is honest.
+        @Override public int checkCallingOrSelfPermission(String permission) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        @Override public int checkCallingPermission(String permission) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        @Override public int checkSelfPermission(String permission) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        @Override public int checkPermission(String permission, int pid, int uid) {
+            return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
         @Override public android.content.res.Resources getResources() {
             return android.content.res.Resources.getSystem();
         }
