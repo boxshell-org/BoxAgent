@@ -109,7 +109,12 @@ class AgentController(
 
     suspend fun loadConversation(id: Long) {
         if (_state.value.running) return
-        val msgs = withContext(Dispatchers.IO) { db.messages().forConversation(id).first() }
+        val msgs = runCatching {
+            withContext(Dispatchers.IO) { db.messages().forConversation(id).first() }
+        }.getOrElse {
+            _state.update { s -> s.copy(error = it.message) }
+            return
+        }
         _state.update {
             it.copy(
                 conversationId = id,
@@ -365,12 +370,15 @@ class AgentController(
         val convId = _state.value.conversationId
         agentHandle = -1
         scope.launch {
-            if (!finalText.isNullOrEmpty() && convId > 0) {
-                db.messages().insert(
-                    Message(conversationId = convId, role = "assistant", content = finalText),
-                )
-                // Keep the prompt-derived title; just bump recency.
-                db.conversations().bump(convId)
+            // Persistence failure must not strand the FGS on "task running".
+            runCatching {
+                if (!finalText.isNullOrEmpty() && convId > 0) {
+                    db.messages().insert(
+                        Message(conversationId = convId, role = "assistant", content = finalText),
+                    )
+                    // Keep the prompt-derived title; just bump recency.
+                    db.conversations().bump(convId)
+                }
             }
             idleService()
         }

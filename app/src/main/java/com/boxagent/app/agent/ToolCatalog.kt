@@ -15,9 +15,12 @@ data class ToolSpec(
 
 /** Parsed copy of the Rust tool registry (nativeToolCatalog). */
 object ToolCatalog {
-    private var cache: List<ToolSpec>? = null
+    @Volatile private var cache: List<ToolSpec>? = null
 
-    fun all(): List<ToolSpec> = cache ?: load().also { cache = it }
+    /** Empty when the native catalog can't be read — callers fall back to
+     *  default risk/labels rather than failing every tool call. */
+    fun all(): List<ToolSpec> =
+        cache ?: runCatching { load() }.getOrDefault(emptyList()).also { cache = it }
 
     fun byName(name: String): ToolSpec? = all().firstOrNull { it.name == name }
 

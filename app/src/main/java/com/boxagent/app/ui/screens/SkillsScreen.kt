@@ -150,7 +150,7 @@ fun SkillsScreen(
     var importMsg by remember { mutableStateOf<String?>(null) }
     var editorError by remember { mutableStateOf<String?>(null) }
     var deleting by remember { mutableStateOf<Skill?>(null) }
-    val hasAi = remember { app.secrets.apiKey.isNotEmpty() }
+    val hasAi = remember { runCatching { app.secrets.apiKey.isNotEmpty() }.getOrDefault(false) }
 
     LaunchedEffect(incoming) {
         incoming?.let {

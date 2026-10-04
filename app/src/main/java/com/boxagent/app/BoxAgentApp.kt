@@ -87,9 +87,13 @@ class BoxAgentApp : Application() {
         } else {
             daemon.reconnect()
         }
-        db.audit().insert(
-            AuditEntry(kind = "lifecycle", detail = "health check ${daemon.status.value.shell}", ok = true),
-        )
+        // Logging the check is best-effort — a Room hiccup shouldn't make
+        // the worker report failure and retry.
+        runCatching {
+            db.audit().insert(
+                AuditEntry(kind = "lifecycle", detail = "health check ${daemon.status.value.shell}", ok = true),
+            )
+        }
     }
 
     fun onBootRestore(done: () -> Unit = {}) {

@@ -329,7 +329,14 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
     callbacks: JObject,
 ) -> jlong {
     let config = get_string(&mut env, &config);
-    let parsed: Result<Value, _> = serde_json::from_str(&config);
+    // Parse first: a bad config must not leak the callbacks GlobalRef.
+    let v: Value = match serde_json::from_str(&config) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("config json: {e}");
+            return -1;
+        }
+    };
     let jvm = match env.get_java_vm() {
         Ok(v) => v,
         Err(e) => {
@@ -341,14 +348,6 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("global ref: {e}");
-            return -1;
-        }
-    };
-
-    let v = match parsed {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("config json: {e}");
             return -1;
         }
     };
@@ -406,7 +405,23 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
 
     let jvm_ptr = jvm.get_java_vm_pointer() as usize;
     std::thread::spawn(move || {
-        let raw_vm = || unsafe { JavaVM::from_raw(jvm_ptr as *mut jni::sys::JavaVM).unwrap() };
+        // Removes the agent-map entry even when setup code panics before
+        // the guarded run below — a leaked entry would make cancel() a
+        // no-op and the UI could wait on events that never come.
+        struct MapGuard(u64);
+        impl Drop for MapGuard {
+            fn drop(&mut self) {
+                if let Ok(mut m) = agents().lock() {
+                    m.remove(&self.0);
+                }
+            }
+        }
+        let _guard = MapGuard(id);
+
+        let raw_vm = || unsafe {
+            JavaVM::from_raw(jvm_ptr as *mut jni::sys::JavaVM)
+                .expect("JavaVM pointer was valid at spawn")
+        };
         let err_sink = JniSink {
             jvm: raw_vm(),
             callbacks: callbacks.clone(),
@@ -436,9 +451,6 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
         };
         if let Some(message) = message {
             err_sink.emit(json!({"type": "error", "message": message}));
-        }
-        if let Ok(mut m) = agents().lock() {
-            m.remove(&id);
         }
     });
     id as jlong

@@ -44,8 +44,10 @@ pub fn write(path: &str, data: &[u8]) -> Result<()> {
 pub fn list(path: &str) -> Result<Vec<FileEntry>> {
     let mut out = Vec::new();
     for ent in std::fs::read_dir(path).with_context(|| format!("readdir {path}"))? {
-        let ent = ent?;
-        let meta = ent.metadata()?;
+        // One unreadable entry (dangling symlink, racing unlink) shouldn't
+        // fail the whole listing.
+        let Ok(ent) = ent else { continue };
+        let Ok(meta) = ent.metadata() else { continue };
         out.push(FileEntry {
             name: ent.file_name().to_string_lossy().into_owned(),
             is_dir: meta.is_dir(),

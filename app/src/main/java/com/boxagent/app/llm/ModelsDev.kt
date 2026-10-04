@@ -67,14 +67,20 @@ object ModelsDev {
 
     suspend fun catalog(ctx: Context): List<CatalogProvider> = withContext(Dispatchers.IO) {
         cached?.let { return@withContext it }
+        var disk = false
         val raw = try {
             httpGet(URL).also { body ->
                 runCatching { File(ctx.filesDir, CACHE_FILE).writeText(body) }
             }
         } catch (e: Exception) {
-            readDiskCache(ctx) ?: throw e
+            readDiskCache(ctx)?.also { disk = true } ?: throw e
         }
-        parse(raw).also { cached = it }
+        // A corrupt disk cache must not poison the catalog forever —
+        // surface the original fetch error instead of a parse error.
+        runCatching { parse(raw) }.getOrElse { pe ->
+            if (disk) throw IOException("catalog unavailable (cache corrupt)")
+            throw pe
+        }.also { cached = it }
     }
 
     /** Match a provider by its OpenAI-compatible base URL (normalized). */

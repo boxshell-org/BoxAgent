@@ -59,6 +59,9 @@ class DaemonClient private constructor(
                 val alive = recv().optString("type") == "pong"
                 socket.soTimeout = 0
                 alive
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                socket.soTimeout = 0
+                throw e
             } catch (e: Exception) {
                 // A timed-out read may have consumed half a frame.
                 broken = true
@@ -78,6 +81,11 @@ class DaemonClient private constructor(
             try {
                 block()
             } catch (e: DaemonError) {
+                throw e
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Structured cancellation is not a transport failure: the
+                // blocking reads aren't interruptible, so nothing was
+                // consumed mid-frame from this thread's point of view.
                 throw e
             } catch (e: Exception) {
                 broken = true
@@ -244,6 +252,9 @@ class DaemonClient private constructor(
                     } else {
                         socket.close(); null
                     }
+                }.onFailure {
+                    // runCatching swallows CancellationException — don't.
+                    if (it is kotlinx.coroutines.CancellationException) throw it
                 }.getOrNull()
             }
     }

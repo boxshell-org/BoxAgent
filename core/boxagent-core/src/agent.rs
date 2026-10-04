@@ -178,21 +178,56 @@ impl<E: ToolExecutor, S: EventSink> Agent<E, S> {
             if steps >= self.cfg.max_steps {
                 return Err(AgentError::StepLimit);
             }
-            let Some(remaining) = wall.checked_sub(started.elapsed()) else {
+            if wall.checked_sub(started.elapsed()).is_none() {
                 return Err(AgentError::TimeBudget);
-            };
+            }
             turn += 1;
 
-            let request = llm::chat_stream(&self.cfg.llm, &messages, &tools, |delta| {
-                self.sink.emit(json!({"type": "text_delta", "text": delta}));
-            });
-            let mut assistant = tokio::select! {
-                r = tokio::time::timeout(remaining, request) => match r {
-                    Ok(r) => r?,
-                    Err(_) => return Err(AgentError::TimeBudget),
-                },
-                _ = self.cancelled() => return Err(AgentError::Cancelled),
-            };
+            // One retry on a transport-level failure — flaky connectivity is
+            // the norm on phones. Only safe while nothing was streamed: a
+            // mid-stream failure would duplicate already-delivered text.
+            let mut assistant;
+            let mut tried_retry = false;
+            loop {
+                let mut saw_delta = false;
+                let request = llm::chat_stream(&self.cfg.llm, &messages, &tools, |delta| {
+                    saw_delta = true;
+                    self.sink.emit(json!({"type": "text_delta", "text": delta}));
+                });
+                let Some(remaining) = wall.checked_sub(started.elapsed()) else {
+                    return Err(AgentError::TimeBudget);
+                };
+                let outcome = tokio::select! {
+                    r = tokio::time::timeout(remaining, request) => match r {
+                        Ok(r) => r,
+                        Err(_) => return Err(AgentError::TimeBudget),
+                    },
+                    _ = self.cancelled() => return Err(AgentError::Cancelled),
+                };
+                match outcome {
+                    Err(llm::LlmError::Network(msg)) if !tried_retry && !saw_delta => {
+                        tried_retry = true;
+                        self.sink.emit(json!({
+                            "type": "warn",
+                            "message": format!("network error ({msg}) — retrying…"),
+                        }));
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(1200)) => {}
+                            _ = self.cancelled() => return Err(AgentError::Cancelled),
+                        }
+                        let Some(left) = wall.checked_sub(started.elapsed()) else {
+                            return Err(AgentError::TimeBudget);
+                        };
+                        if left < Duration::from_secs(5) {
+                            return Err(AgentError::TimeBudget);
+                        }
+                    }
+                    other => {
+                        assistant = other?;
+                        break;
+                    }
+                }
+            }
 
             if let Some(u) = &assistant.usage {
                 let last = Usage::from_value(u);

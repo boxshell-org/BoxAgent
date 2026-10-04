@@ -65,21 +65,29 @@ class SkillRepository(
         }
     }
 
-    suspend fun delete(id: Long) = dao.delete(id)
+    // Simple mutators are called fire-and-forget from UI scopes — a Room
+    // failure should degrade silently rather than kill the caller's job.
+    suspend fun delete(id: Long) = runCatching { dao.delete(id) }
 
     suspend fun setEnabled(s: Skill, on: Boolean) {
-        dao.byId(s.id)?.let { dao.update(it.copy(enabled = on, updatedAt = System.currentTimeMillis())) }
+        runCatching {
+            dao.byId(s.id)?.let {
+                dao.update(it.copy(enabled = on, updatedAt = System.currentTimeMillis()))
+            }
+        }
     }
 
     /** Draft reviewed: the agent may use it from the next run. */
     suspend fun approve(s: Skill) {
-        dao.byId(s.id)?.let {
-            dao.update(it.copy(draft = false, enabled = true, updatedAt = System.currentTimeMillis()))
+        runCatching {
+            dao.byId(s.id)?.let {
+                dao.update(it.copy(draft = false, enabled = true, updatedAt = System.currentTimeMillis()))
+            }
         }
     }
 
     suspend fun recordUse(name: String, run: Boolean, ok: Boolean) =
-        dao.recordUse(name, if (run) 1 else 0, if (run && ok) 1 else 0)
+        runCatching { dao.recordUse(name, if (run) 1 else 0, if (run && ok) 1 else 0) }
 
     /** First free slug for [base]: `base`, `base-2`, … */
     suspend fun uniqueName(base: String): String {

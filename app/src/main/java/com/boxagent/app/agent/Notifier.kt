@@ -41,17 +41,25 @@ object Notifier {
             .build()
     }
 
-    fun post(context: Context, title: String, text: String) {
+    /** Post a user-visible notification. False when notifications are
+     *  denied — callers that promised something should report it. */
+    fun post(context: Context, title: String, text: String): Boolean {
+        if (!androidx.core.app.NotificationManagerCompat.from(context)
+                .areNotificationsEnabled()
+        ) return false
         ensureChannel(context)
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(
-            nextId++,
-            NotificationCompat.Builder(context, CHANNEL)
-                .setSmallIcon(R.drawable.ic_notification)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setAutoCancel(true)
-                .build(),
-        )
+        return runCatching {
+            nm.notify(
+                nextId++,
+                NotificationCompat.Builder(context, CHANNEL)
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setContentTitle(title)
+                    .setContentText(text)
+                    .setAutoCancel(true)
+                    .build(),
+            )
+            true
+        }.getOrDefault(false)
     }
 }

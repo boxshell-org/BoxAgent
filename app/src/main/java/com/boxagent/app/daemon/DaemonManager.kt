@@ -59,7 +59,9 @@ class DaemonManager(
                 secrets.adbKeyPem = resp.getJSONObject("data").getString("pem")
             }
         }
-        return secrets.adbKeyPem
+        return secrets.adbKeyPem.ifEmpty {
+            error("could not generate or load the adb key")
+        }
     }
 
     /** mDNS-free pairing entry: user typed port + code from the wireless
@@ -72,6 +74,8 @@ class DaemonManager(
                 val resp = JSONObject(Core.nativePair(host, port, code, pem))
                 if (!resp.optBoolean("ok")) error(resp.optString("error"))
                 resp.getJSONObject("data").optString("guid")
+            }.onFailure {
+                if (it is kotlinx.coroutines.CancellationException) throw it
             }.onSuccess {
                 _status.value = DaemonStatus(ShellState.OFFLINE, detail = "key:paired_pending")
             }.onFailure {
@@ -147,6 +151,7 @@ class DaemonManager(
             startWatchdog()
             cli
         }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
             _status.value = DaemonStatus(ShellState.ERROR, detail = it.message ?: "key:spawn_failed")
         }
     }
@@ -211,17 +216,24 @@ class DaemonManager(
         watchdogJob = scope.launch {
             while (isActive) {
                 delay(15_000)
-                if (!settings.keepWatchdog.first()) continue
-                val c = client ?: continue
-                if (!c.ping()) {
-                    _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:daemon_lost")
-                    c.close()
-                    client = null
-                    reconnect() ?: run {
-                        val host = settings.adbHost.first()
-                        val port = settings.adbPort.first()
-                        if (port > 0) connectAndSpawn(host, port)
+                // One bad read (a DataStore hiccup, a reconnect racing a
+                // spawn) must not kill the watchdog for the rest of the
+                // process lifetime.
+                runCatching {
+                    if (!settings.keepWatchdog.first()) return@runCatching
+                    val c = client ?: return@runCatching
+                    if (!c.ping()) {
+                        _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:daemon_lost")
+                        c.close()
+                        client = null
+                        reconnect() ?: run {
+                            val host = settings.adbHost.first()
+                            val port = settings.adbPort.first()
+                            if (port > 0) connectAndSpawn(host, port)
+                        }
                     }
+                }.onFailure {
+                    if (it is kotlinx.coroutines.CancellationException) throw it
                 }
             }
         }

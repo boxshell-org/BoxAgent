@@ -107,7 +107,7 @@ class ToolRunner(
                 execute(name, argsJson)
             }?.toString() ?: JSONObject()
                 .put("ok", false)
-                .put("error", "tool call timed out")
+                .put("error", "tool call timed out after ${CALL_TIMEOUT_MS / 1000}s")
                 .toString()
         }
 
@@ -132,6 +132,10 @@ class ToolRunner(
         val result = runCatching {
             dispatch(name, args ?: throw IllegalArgumentException("arguments must be a JSON object"))
         }.getOrElse { e ->
+            // executeBlocking's timeout cancels dispatch; letting the
+            // CancellationException escape is what makes withTimeoutOrNull
+            // return null — and the caller the "timed out" error.
+            if (e is kotlinx.coroutines.CancellationException) throw e
             JSONObject().put("ok", false)
                 .put("error", e.message ?: e.javaClass.simpleName)
         }
@@ -154,16 +158,24 @@ class ToolRunner(
 
     private suspend fun awaitConfirm(name: String, argsJson: String): Boolean {
         val deferred = CompletableDeferred<Boolean>()
-        _pending.value = PendingConfirm(name, argsJson, riskOf(name), deferred)
-        return deferred.await()
+        val pc = PendingConfirm(name, argsJson, riskOf(name), deferred)
+        _pending.value = pc
+        try {
+            return deferred.await()
+        } finally {
+            // A cancelled/timed-out call must not leave its card up —
+            // answering it would do nothing.
+            _pending.compareAndSet(pc, null)
+        }
     }
 
     private suspend fun dispatch(name: String, a: JSONObject): JSONObject {
         return when (name) {
             // -------- meta handled here (task_done/ask_user handled in Rust) --
             "notify" -> {
-                Notifier.post(context, a.getString("title"), a.getString("text"))
-                ok()
+                val posted = Notifier.post(context, a.getString("title"), a.getString("text"))
+                if (posted) ok()
+                else err(SecurityException("notifications permission denied"))
             }
             // -------- shell backend ----------
             "shell_exec" -> shellExec(

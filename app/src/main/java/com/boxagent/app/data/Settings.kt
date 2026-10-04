@@ -8,7 +8,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import java.io.IOException
 
 private val Context.prefs by preferencesDataStore(name = "boxagent_prefs")
 
@@ -87,41 +89,52 @@ class Settings(private val context: Context) {
             stored?.takeIf { squash(it) !in LEGACY_DEFAULT_PROMPTS }?.trim().orEmpty()
     }
 
-    val baseUrl: Flow<String> = context.prefs.data.map { it[KEY_BASE_URL] ?: LlmProfile().baseUrl }
-    val model: Flow<String> = context.prefs.data.map { it[KEY_MODEL] ?: LlmProfile().model }
+    /**
+     * Reads degrade to defaults on a corrupt store rather than crashing
+     * every collector (`CorruptionException` is an `IOException`; a write
+     * repairs the file).
+     */
+    private val data: Flow<androidx.datastore.preferences.core.Preferences> =
+        context.prefs.data.catch { e ->
+            if (e is IOException) emit(androidx.datastore.preferences.core.emptyPreferences())
+            else throw e
+        }
+
+    val baseUrl: Flow<String> = data.map { it[KEY_BASE_URL] ?: LlmProfile().baseUrl }
+    val model: Flow<String> = data.map { it[KEY_MODEL] ?: LlmProfile().model }
     val temperature: Flow<Double> =
-        context.prefs.data.map { (it[KEY_TEMP] ?: "0.2").toDoubleOrNull() ?: 0.2 }
-    val maxTokens: Flow<Int> = context.prefs.data.map { it[KEY_MAX_TOKENS] ?: 4096 }
+        data.map { (it[KEY_TEMP] ?: "0.2").toDoubleOrNull() ?: 0.2 }
+    val maxTokens: Flow<Int> = data.map { it[KEY_MAX_TOKENS] ?: 4096 }
     /** User's custom instructions, appended to the core's built-in
      *  operating guide (stored under the old "system_prompt" key). */
     val systemPrompt: Flow<String> =
-        context.prefs.data.map { customInstructions(it[KEY_SYSTEM_PROMPT]) }
-    val confirmPolicy: Flow<ConfirmPolicy> = context.prefs.data.map {
+        data.map { customInstructions(it[KEY_SYSTEM_PROMPT]) }
+    val confirmPolicy: Flow<ConfirmPolicy> = data.map {
         runCatching { ConfirmPolicy.valueOf(it[KEY_CONFIRM_POLICY] ?: "BALANCED") }
             .getOrDefault(ConfirmPolicy.BALANCED)
     }
-    val maxSteps: Flow<Int> = context.prefs.data.map { it[KEY_MAX_STEPS] ?: 40 }
+    val maxSteps: Flow<Int> = data.map { it[KEY_MAX_STEPS] ?: 40 }
     val maxWallMs: Flow<Long> =
-        context.prefs.data.map { (it[KEY_MAX_WALL_MS] ?: "600000").toLongOrNull() ?: 600_000L }
-    val onboarded: Flow<Boolean> = context.prefs.data.map { it[KEY_ONBOARDED] ?: false }
-    val keepWatchdog: Flow<Boolean> = context.prefs.data.map { it[KEY_KEEP_WATCHDOG] ?: true }
-    val privBackend: Flow<String> = context.prefs.data.map { it[KEY_PRIV_BACKEND] ?: "builtin" }
-    val daemonSocket: Flow<String> = context.prefs.data.map { it[KEY_DAEMON_SOCKET] ?: "" }
-    val adbHost: Flow<String> = context.prefs.data.map { it[KEY_ADB_HOST] ?: "127.0.0.1" }
-    val adbPort: Flow<Int> = context.prefs.data.map { it[KEY_ADB_PORT] ?: 0 }
-    val theme: Flow<String> = context.prefs.data.map { it[KEY_THEME] ?: "system" }
+        data.map { (it[KEY_MAX_WALL_MS] ?: "600000").toLongOrNull() ?: 600_000L }
+    val onboarded: Flow<Boolean> = data.map { it[KEY_ONBOARDED] ?: false }
+    val keepWatchdog: Flow<Boolean> = data.map { it[KEY_KEEP_WATCHDOG] ?: true }
+    val privBackend: Flow<String> = data.map { it[KEY_PRIV_BACKEND] ?: "builtin" }
+    val daemonSocket: Flow<String> = data.map { it[KEY_DAEMON_SOCKET] ?: "" }
+    val adbHost: Flow<String> = data.map { it[KEY_ADB_HOST] ?: "127.0.0.1" }
+    val adbPort: Flow<Int> = data.map { it[KEY_ADB_PORT] ?: 0 }
+    val theme: Flow<String> = data.map { it[KEY_THEME] ?: "system" }
     /** Short tool schemas (summary instead of full description). */
     val compactTools: Flow<Boolean> =
-        context.prefs.data.map { it[KEY_COMPACT_TOOLS] ?: true }
+        data.map { it[KEY_COMPACT_TOOLS] ?: true }
     /** Send marked screenshots to the model (vision-capable models only). */
-    val vision: Flow<Boolean> = context.prefs.data.map { it[KEY_VISION] ?: false }
+    val vision: Flow<Boolean> = data.map { it[KEY_VISION] ?: false }
     /** Let the agent propose skills (saved as drafts for review). */
-    val learnSkills: Flow<Boolean> = context.prefs.data.map { it[KEY_LEARN_SKILLS] ?: true }
+    val learnSkills: Flow<Boolean> = data.map { it[KEY_LEARN_SKILLS] ?: true }
     /** Built-in skill names seeded so far (deleted ones are not re-added). */
-    val seededSkills: Flow<Set<String>> = context.prefs.data.map { it[KEY_SEEDED_SKILLS] ?: emptySet() }
+    val seededSkills: Flow<Set<String>> = data.map { it[KEY_SEEDED_SKILLS] ?: emptySet() }
 
     /** User-saved provider presets (name/baseUrl/model) as a JSON array. */
-    val customProviders: Flow<List<LlmProfile>> = context.prefs.data.map { p ->
+    val customProviders: Flow<List<LlmProfile>> = data.map { p ->
         runCatching {
             val arr = org.json.JSONArray(p[KEY_CUSTOM_PROVIDERS] ?: "[]")
             (0 until arr.length()).map { i ->
