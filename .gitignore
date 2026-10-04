@@ -20,3 +20,4 @@ app/src/main/jniLibs/
 # OS
 .DS_Store
 core/target
+.kotlin/

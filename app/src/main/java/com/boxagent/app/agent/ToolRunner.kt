@@ -97,9 +97,19 @@ class ToolRunner(
         }
     }
 
-    /** Called by the Rust agent loop (on its own thread). Must not suspend. */
+    /** Called by the Rust agent loop (on its own thread). Must not suspend.
+     *  Bounded so a call that never returns (wedged daemon socket, a
+     *  gesture/screenshot callback that never fires, a forgotten confirm)
+     *  can't park the run — and the input dock — forever. */
     fun executeBlocking(name: String, argsJson: String): String =
-        kotlinx.coroutines.runBlocking(Dispatchers.IO) { execute(name, argsJson) }
+        kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            kotlinx.coroutines.withTimeoutOrNull(CALL_TIMEOUT_MS) {
+                execute(name, argsJson)
+            }?.toString() ?: JSONObject()
+                .put("ok", false)
+                .put("error", "tool call timed out")
+                .toString()
+        }
 
     suspend fun execute(name: String, argsJson: String): String {
         val start = System.currentTimeMillis()
@@ -586,6 +596,8 @@ class ToolRunner(
         const val MAX_STDOUT = 6000
         const val MAX_STDERR = 1500
         const val MAX_APPS_LISTED = 120
+        /** Upper bound for one tool call; `wait_for` itself caps lower. */
+        const val CALL_TIMEOUT_MS = 180_000L
 
         /** Keep the start and the end: errors and summaries usually sit at
          *  the bottom of command output. */

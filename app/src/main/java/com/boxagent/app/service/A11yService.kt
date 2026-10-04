@@ -30,6 +30,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -384,14 +385,27 @@ class A11yService : AccessibilityService() {
     // ------------------------------------------------------------------
     // Gestures
 
-    private suspend fun dispatch(gd: GestureDescription): Boolean =
-        suspendCancellableCoroutine { cont ->
-            val ok = dispatchGesture(gd, object : GestureResultCallback() {
-                override fun onCompleted(g: GestureDescription) = cont.resume(true)
-                override fun onCancelled(g: GestureDescription) = cont.resume(false)
-            }, null)
-            if (!ok) cont.resume(false)
-        }
+    private suspend fun dispatch(gd: GestureDescription): Boolean {
+        // Bound the wait: on some ROMs the callback simply never fires and
+        // the tool call (and the whole run) would hang forever. Longest
+        // legal gesture = all strokes back to back.
+        val strokesMs = (0 until gd.strokeCount)
+            .sumOf { gd.getStroke(it).duration }
+            .coerceIn(1, 60_000)
+        return withTimeoutOrNull(strokesMs + 4_000) {
+            suspendCancellableCoroutine { cont ->
+                val ok = dispatchGesture(gd, object : GestureResultCallback() {
+                    override fun onCompleted(g: GestureDescription) {
+                        if (cont.isActive) cont.resume(true)
+                    }
+                    override fun onCancelled(g: GestureDescription) {
+                        if (cont.isActive) cont.resume(false)
+                    }
+                }, null)
+                if (!ok && cont.isActive) cont.resume(false)
+            }
+        } ?: false
+    }
 
     /** Strokes must have non-negative coordinates and 1..max ms duration,
      *  or dispatchGesture throws. */
@@ -659,25 +673,27 @@ class A11yService : AccessibilityService() {
     private suspend fun captureBitmap(retry: Boolean = true): Bitmap? {
         if (Build.VERSION.SDK_INT < 30) return null
         var code = 0
-        val bmp = suspendCancellableCoroutine { cont ->
-            takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                mainExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(shot: ScreenshotResult) {
-                        val sw = runCatching {
-                            val hw = Bitmap.wrapHardwareBuffer(shot.hardwareBuffer, shot.colorSpace)
-                            hw?.copy(Bitmap.Config.ARGB_8888, true).also { hw?.recycle() }
-                        }.getOrNull()
-                        shot.hardwareBuffer.close()
-                        cont.resume(sw)
-                    }
-                    override fun onFailure(errorCode: Int) {
-                        code = errorCode
-                        cont.resume(null)
-                    }
-                },
-            )
+        val bmp = withTimeoutOrNull(8_000) {
+            suspendCancellableCoroutine<Bitmap?> { cont ->
+                takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    mainExecutor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(shot: ScreenshotResult) {
+                            val sw = runCatching {
+                                val hw = Bitmap.wrapHardwareBuffer(shot.hardwareBuffer, shot.colorSpace)
+                                hw?.copy(Bitmap.Config.ARGB_8888, true).also { hw?.recycle() }
+                            }.getOrNull()
+                            shot.hardwareBuffer.close()
+                            if (cont.isActive) cont.resume(sw)
+                        }
+                        override fun onFailure(errorCode: Int) {
+                            code = errorCode
+                            if (cont.isActive) cont.resume(null)
+                        }
+                    },
+                )
+            }
         }
         if (bmp == null && retry && code == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
             delay(1100)

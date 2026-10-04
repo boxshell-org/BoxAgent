@@ -95,7 +95,9 @@ class AgentController(
     /** UI ids for LazyColumn keys — one sequence for live AND loaded rows. */
     private val msgCounter = AtomicLong(0)
     private val assistantBuf = StringBuilder()
-    private val callbacks = Callbacks()
+    /** Callbacks of the live run — a stale run's events are dropped so a
+     *  late `error`/`done` can't kill a newer run's state. */
+    @Volatile private var activeCallbacks: Callbacks? = null
     @Volatile private var runPrompt = ""
 
     private fun nextId() = msgCounter.incrementAndGet()
@@ -122,7 +124,9 @@ class AgentController(
 
     fun send(prompt: String) {
         if (prompt.isBlank()) return
-        val apiKey = secrets.apiKey
+        // Keystore init can throw on devices with a wiped/locked key store —
+        // a send must never crash the app.
+        val apiKey = runCatching { secrets.apiKey }.getOrDefault("")
         if (apiKey.isEmpty()) {
             _state.update {
                 it.copy(error = context.getString(R.string.error_no_api_key))
@@ -138,7 +142,7 @@ class AgentController(
      * over when a key is configured. Instruction-only skills need the LLM.
      */
     fun runSkill(skill: Skill, params: Map<String, String>, allowAi: Boolean = true) {
-        val apiKey = secrets.apiKey
+        val apiKey = runCatching { secrets.apiKey }.getOrDefault("")
         if (apiKey.isEmpty() && !skill.runnable) {
             _state.update { it.copy(error = context.getString(R.string.error_no_api_key)) }
             return
@@ -244,8 +248,11 @@ class AgentController(
             context.getString(R.string.notif_running_task),
         )
 
-        agentHandle = Core.nativeStartAgent(config.toString(), callbacks)
+        val cb = Callbacks()
+        activeCallbacks = cb
+        agentHandle = Core.nativeStartAgent(config.toString(), cb)
         if (agentHandle < 0) {
+            activeCallbacks = null
             _state.update {
                 it.copy(running = false, error = context.getString(R.string.error_agent_start))
             }
@@ -306,8 +313,28 @@ class AgentController(
         // The agent thread may be parked on the user — release it so the
         // cancel flag is seen right away instead of never.
         _state.value.pendingAsk?.answer?.complete("")
-        _state.update { it.copy(pendingAsk = null) }
         toolRunner.cancelPending()
+        // …or parked inside a tool call that never returns (a gesture or
+        // screenshot whose callback never fires, a wedged daemon socket):
+        // then `cancelled` never arrives and `running` stays true forever,
+        // which disables the input dock — the user can never send again.
+        // Release the UI now; the dead run's late events are dropped by
+        // the stale-callback check.
+        activeCallbacks = null
+        agentHandle = -1
+        // The Rust side's `cancelled` event is dropped with the callbacks,
+        // so show the stopped marker and flush streamed text here.
+        flushAssistant()
+        _state.update {
+            if (!it.running) it.copy(pendingAsk = null, skillRun = null)
+            else it.copy(
+                running = false, pendingAsk = null, skillRun = null,
+                messages = it.messages + ChatMsg(
+                    nextId(), "system", context.getString(R.string.chat_stopped),
+                ),
+            )
+        }
+        scope.launch { idleService() }
     }
 
     fun answerAsk(text: String) {
@@ -364,7 +391,11 @@ class AgentController(
     }
 
     private inner class Callbacks : AgentCallbacks {
+        /** Events/tools from a superseded run must not touch live state. */
+        private fun active() = this === activeCallbacks
+
         override fun onEvent(json: String) {
+            if (!active()) return
             val e = runCatching { JSONObject(json) }.getOrNull() ?: return
             when (e.optString("type")) {
                 "text_delta" -> appendAssistantDelta(e.optString("text"))
@@ -485,9 +516,11 @@ class AgentController(
         }
 
         override fun executeTool(name: String, argsJson: String): String =
-            toolRunner.executeBlocking(name, argsJson)
+            if (!active()) """{"ok":false,"error":"run superseded"}"""
+            else toolRunner.executeBlocking(name, argsJson)
 
         override fun askUser(question: String): String {
+            if (!active()) return ""
             val deferred = CompletableDeferred<String>()
             _state.update { it.copy(pendingAsk = PendingAsk(question, deferred)) }
             return kotlinx.coroutines.runBlocking { deferred.await() }
