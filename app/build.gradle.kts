@@ -6,6 +6,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
+    // JVM screenshot rendering of Compose UI (src/test/.../ui): lets UI
+    // changes be reviewed as images without a device.
+    id("app.cash.paparazzi") version "1.3.5"
 }
 
 // ---- version derivation --------------------------------------------------
@@ -156,4 +159,6 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM tests (android.jar only has stubs).
+    testImplementation("org.json:json:20240303")
 }

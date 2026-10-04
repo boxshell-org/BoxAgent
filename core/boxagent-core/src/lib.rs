@@ -6,6 +6,9 @@
 
 pub mod adb_ops;
 pub mod agent;
+pub mod context;
 pub mod jni;
 pub mod llm;
+pub mod prompt;
+pub mod skills;
 pub mod tools;

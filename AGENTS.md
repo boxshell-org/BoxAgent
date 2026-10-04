@@ -24,8 +24,17 @@ gradle.properties.
 
 ## Build
 
-    # Rust workspace check + tests (host)
+    # Rust workspace check + tests (host; includes a daemon integration test
+    # over a real abstract socket and agent-loop tests against a mock LLM)
     cd core && cargo test --workspace
+
+    # Kotlin JVM unit tests (screen model, skills codec, markdown, settings
+    # migration, Room migration SQL) + Paparazzi UI renders
+    $GRADLE :app:testDebugUnitTest -PskipRustBuild=true
+
+    # Re-record UI screenshots after UI changes, then review the PNGs in
+    # app/src/test/snapshots/images/ (light + dark, Pixel 6)
+    $GRADLE :app:recordPaparazziDebug -PskipRustBuild=true
 
     # Native libs -> app/src/main/jniLibs/{arm64-v8a,x86_64}/lib{boxagent,boxagentd}.so
     ./scripts/build-rust.sh "$PWD/app/src/main/jniLibs"
@@ -41,8 +50,18 @@ gradle.properties.
   abstract Unix socket + token auth, streamed exec / fs / screencap
 - `core/adb-tls` — wireless-debugging pairing (TLS client-cert, SPAKE2 with
   EKM-bound password, AES-128-GCM PeerInfo) + AOSP adb pubkey encoding
-- `core/boxagent-core` — JNI lib: tool registry, OpenAI-compatible SSE LLM
-  client, agent loop, adb ops via adb_client crate
+- `core/boxagent-core` — JNI lib: tool registry (capability-filtered tool
+  set), OpenAI-compatible SSE LLM client, agent loop (`act` batching),
+  `context.rs` (screen dedup/elision, images, repeat hints, usage),
+  `prompt.rs` (built-in operating guide), `skills.rs` (skill index,
+  `{{param}}` / `{{param|url}}` expansion, zero-LLM skill runs), adb ops via
+  adb_client crate
+- `app/skills/` — skill model + codec (validation, import/export, recording
+  refs → text selectors), built-in library, Room-backed `SkillRepository`
+  (DB v2; `MIGRATION_1_2` must mirror Room's generated SQL — a unit test
+  checks it)
+- `app/screen/ScreenModel.kt` — pure-Kotlin compact screen (`[ref] role:
+  label (state) @x,y`) with stable refs; A11yService snapshots into it
 - `app/` — Kotlin shell: Compose UI (Apple B/W, see DESIGN.md), A11yService,
   AgentService (FGS), DaemonManager/Client, ToolRunner (risk + confirm gate),
   Room audit log, EncryptedSharedPreferences secrets
@@ -50,7 +69,17 @@ gradle.properties.
 ## Conventions
 
 - Every tool call round-trips through `ToolRunner` (confirmation policy +
-  audit); never call daemon/a11y directly from the agent.
+  audit); never call daemon/a11y directly from the agent. `act` steps are
+  expanded in the core and each step goes through `ToolRunner` too.
+- Screen-changing a11y tools return `screen` (after settling) unless called
+  with `observe:false`; the core keeps only the newest screen in context.
+- Skills from the agent (`save_skill`) or imports are stored as drafts; the
+  agent only sees approved, enabled skills. Skill steps run through
+  `ToolRunner` like any call.
+- UI screens are stateless `*Content` composables plus a thin wrapper that
+  wires `BoxAgentApp`; keep it that way so Paparazzi can render them.
+  Text drawn on the background relies on `LocalContentColor` from
+  `BoxAgentTheme` (don't hardcode black/white).
 - Secrets (LLM key, adb PEM, daemon token) only in `Secrets` — never audit-log them.
 - `git -c user.name=Devin -c user.email=devin@cognition.ai commit` — repo has
   no user config.

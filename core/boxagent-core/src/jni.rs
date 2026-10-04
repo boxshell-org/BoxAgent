@@ -363,7 +363,34 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeStartAgent(
             prompt_cache_key: v["prompt_cache_key"].as_str().unwrap_or_default().into(),
             reasoning_effort: cfg_str(&v, "reasoning_effort"),
         },
-        system_prompt: v["system_prompt"].as_str().unwrap_or_default().into(),
+        // `instructions` (custom text appended to the built-in guide);
+        // older app builds sent the whole prompt as `system_prompt`.
+        instructions: v["instructions"]
+            .as_str()
+            .or_else(|| v["system_prompt"].as_str())
+            .unwrap_or_default()
+            .into(),
+        device_context: cfg_str(&v, "device_context"),
+        caps: {
+            let c = &v["capabilities"];
+            let d = tools::registry::Caps::default();
+            tools::registry::Caps {
+                a11y: c["a11y"].as_bool().unwrap_or(d.a11y),
+                shell: c["shell"].as_bool().unwrap_or(d.shell),
+                vision: c["vision"].as_bool().unwrap_or(d.vision),
+                // Derived by the agent from the skills it was given.
+                skills: false,
+                learn: c["learn"].as_bool().unwrap_or(d.learn),
+            }
+        },
+        skills: crate::skills::parse_all(&v["skills"]),
+        start_skill: v["start_skill"]["name"]
+            .as_str()
+            .map(|name| agent::StartSkill {
+                name: name.to_string(),
+                params: v["start_skill"]["params"].clone(),
+                llm_fallback: v["start_skill"]["llm_fallback"].as_bool().unwrap_or(true),
+            }),
         prompt: v["prompt"].as_str().unwrap_or_default().into(),
         history: v["history"].as_array().cloned().unwrap_or_default(),
         max_steps: v["max_steps"].as_u64().unwrap_or(40) as u32,

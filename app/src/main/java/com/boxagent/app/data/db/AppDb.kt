@@ -4,11 +4,15 @@ import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Update
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "conversations")
@@ -48,6 +52,29 @@ data class AuditEntry(
     val detail: String,
     val ok: Boolean,
     val createdAt: Long = System.currentTimeMillis(),
+)
+
+/** Saved skill (see com.boxagent.app.skills.Skill for field meanings). */
+@Entity(tableName = "skills", indices = [Index(value = ["name"], unique = true)])
+data class SkillEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val title: String,
+    val description: String,
+    val instructions: String,
+    /** Packages, newline-separated. */
+    val apps: String,
+    val paramsJson: String,
+    val stepsJson: String,
+    val enabled: Boolean,
+    val draft: Boolean,
+    val source: String,
+    val uses: Int,
+    val runs: Int,
+    val successes: Int,
+    val lastUsedAt: Long,
+    val createdAt: Long,
+    val updatedAt: Long,
 )
 
 @Dao
@@ -90,9 +117,33 @@ interface AuditDao {
     suspend fun exportAll(): List<AuditEntry>
 }
 
+@Dao
+interface SkillDao {
+    @Query("SELECT * FROM skills")
+    fun all(): Flow<List<SkillEntity>>
+    @Query("SELECT * FROM skills")
+    suspend fun list(): List<SkillEntity>
+    @Query("SELECT * FROM skills WHERE id = :id")
+    suspend fun byId(id: Long): SkillEntity?
+    @Query("SELECT * FROM skills WHERE name = :name")
+    suspend fun byName(name: String): SkillEntity?
+    @Insert suspend fun insert(s: SkillEntity): Long
+    @Update suspend fun update(s: SkillEntity)
+    @Query("DELETE FROM skills WHERE id = :id")
+    suspend fun delete(id: Long)
+    @Query(
+        "UPDATE skills SET uses = uses + 1, runs = runs + :run, " +
+            "successes = successes + :ok, lastUsedAt = :ts WHERE name = :name",
+    )
+    suspend fun recordUse(name: String, run: Int, ok: Int, ts: Long = System.currentTimeMillis())
+}
+
 @Database(
-    entities = [Conversation::class, Message::class, ToolCallRecord::class, AuditEntry::class],
-    version = 1,
+    entities = [
+        Conversation::class, Message::class, ToolCallRecord::class, AuditEntry::class,
+        SkillEntity::class,
+    ],
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDb : RoomDatabase() {
@@ -100,8 +151,21 @@ abstract class AppDb : RoomDatabase() {
     abstract fun messages(): MessageDao
     abstract fun toolCalls(): ToolCallDao
     abstract fun audit(): AuditDao
+    abstract fun skills(): SkillDao
 
     companion object {
+        /** v2: skills table. SQL mirrors Room's generated schema exactly
+         *  (it validates migrated tables against it). */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                MIGRATION_1_2_SQL.forEach(db::execSQL)
+            }
+        }
+        internal val MIGRATION_1_2_SQL = listOf(
+            "CREATE TABLE IF NOT EXISTS `skills` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `title` TEXT NOT NULL, `description` TEXT NOT NULL, `instructions` TEXT NOT NULL, `apps` TEXT NOT NULL, `paramsJson` TEXT NOT NULL, `stepsJson` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `draft` INTEGER NOT NULL, `source` TEXT NOT NULL, `uses` INTEGER NOT NULL, `runs` INTEGER NOT NULL, `successes` INTEGER NOT NULL, `lastUsedAt` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_skills_name` ON `skills` (`name`)",
+        )
+
         @Volatile private var instance: AppDb? = null
         fun get(context: Context): AppDb =
             instance ?: synchronized(this) {
@@ -109,7 +173,7 @@ abstract class AppDb : RoomDatabase() {
                     context.applicationContext,
                     AppDb::class.java,
                     "boxagent.db",
-                ).build().also { instance = it }
+                ).addMigrations(MIGRATION_1_2).build().also { instance = it }
             }
     }
 }

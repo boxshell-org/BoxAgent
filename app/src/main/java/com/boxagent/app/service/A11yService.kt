@@ -4,13 +4,26 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction
+import android.view.accessibility.AccessibilityWindowInfo
+import com.boxagent.app.screen.Bounds
+import com.boxagent.app.screen.Element
+import com.boxagent.app.screen.RefTable
+import com.boxagent.app.screen.Screen
+import com.boxagent.app.screen.ScreenBuilder
+import com.boxagent.app.screen.UiNode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,6 +47,17 @@ class A11yService : AccessibilityService() {
     @Volatile var lastPackage: String = ""
         private set
 
+    /** Activity class from the last window-state change (header context). */
+    @Volatile private var lastActivity: String = ""
+
+    /** Uptime of the last UI-changing event — drives [settle]. */
+    @Volatile private var lastEventAt: Long = 0
+
+    private val refs = RefTable()
+    /** Elements of the latest snapshot, by ref. Guarded by [refs]. */
+    private var current: Map<Int, Element> = emptyMap()
+    private var refsPackage = ""
+
     override fun onServiceConnected() {
         instance = this
         serviceInfo = serviceInfo.apply {
@@ -42,8 +66,22 @@ class A11yService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            lastPackage = event.packageName?.toString() ?: lastPackage
+        event ?: return
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                lastPackage = event.packageName?.toString() ?: lastPackage
+                // className is the activity for activity windows; widgets
+                // (dialogs, popups) report framework classes — skip those.
+                event.className?.toString()
+                    ?.takeIf { !it.startsWith("android.") && !it.startsWith("androidx.") }
+                    ?.let { lastActivity = it }
+                lastEventAt = SystemClock.uptimeMillis()
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED,
+            -> lastEventAt = SystemClock.uptimeMillis()
         }
     }
 
@@ -70,6 +108,123 @@ class A11yService : AccessibilityService() {
     private fun activeRoots(): List<AccessibilityNodeInfo> =
         windows.filter { it.isActive }.mapNotNull { it.root }
             .ifEmpty { listOfNotNull(rootInActiveWindow) }
+
+    // ------------------------------------------------------------------
+    // Compact screen (the model's view) and refs
+
+    /** Wait until the UI stops changing: [quietMs] without accessibility
+     *  events, at least [minMs], at most [maxMs] (animations, clocks and
+     *  video never go quiet). */
+    suspend fun settle(minMs: Long = 150, quietMs: Long = 300, maxMs: Long = 2000) {
+        val start = SystemClock.uptimeMillis()
+        delay(minMs)
+        while (true) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastEventAt >= quietMs || now - start >= maxMs) return
+            delay(50)
+        }
+    }
+
+    /** Snapshot the active window into a numbered [Screen]; its refs
+     *  become the ones `tap ref=…` etc. resolve against. */
+    fun snapshot(): Screen {
+        val roots = activeRoots()
+        val pkg = roots.firstOrNull()?.packageName?.toString()?.ifEmpty { null } ?: lastPackage
+        val budget = intArrayOf(MAX_SNAPSHOT_NODES)
+        val tree = roots.map { toUiNode(it, 0, budget) }
+        synchronized(refs) {
+            if (pkg != refsPackage) {
+                refs.forgetIdentities()
+                refsPackage = pkg
+            }
+            val screen = ScreenBuilder.build(tree, header(pkg), refs)
+            current = screen.elements.associateBy { it.ref }
+            return screen
+        }
+    }
+
+    fun screenText(): String = snapshot().render()
+
+    /** New agent run: numbering restarts at 1. */
+    fun resetRefs() = synchronized(refs) {
+        refs.reset()
+        current = emptyMap()
+    }
+
+    /** Live node for [ref], or null when it is gone from the screen. */
+    private fun nodeFor(ref: Int): AccessibilityNodeInfo? {
+        val e = synchronized(refs) { current[ref] } ?: return null
+        val node = e.node.handle as? AccessibilityNodeInfo ?: return null
+        return node.takeIf { it.refresh() && it.isVisibleToUser }
+    }
+
+    /** What [ref] points at, in replayable terms (see SkillCodec.portable). */
+    fun describe(ref: Int): com.boxagent.app.skills.RefTarget? {
+        val e = synchronized(refs) { current[ref] } ?: return null
+        val n = e.node
+        val own = (n.text ?: n.desc)?.trim()?.takeIf { it.isNotEmpty() && !n.editable }
+        // Rows usually have no text of their own: their title is the first
+        // part of the merged label.
+        val title = e.label.substringBefore(" · ").takeIf { it.isNotEmpty() && !it.startsWith("#") }
+        return com.boxagent.app.skills.RefTarget(
+            text = own ?: title.takeIf { !n.editable },
+            hint = n.hint?.trim()?.takeIf { it.isNotEmpty() },
+            cx = e.bounds.cx,
+            cy = e.bounds.cy,
+            editable = n.editable,
+        )
+    }
+
+    private fun staleRef(ref: Int) =
+        "element [$ref] is not on the current screen — use refs from the latest screen"
+
+    private fun header(pkg: String): String {
+        val (w, h) = screenSize()
+        val act = lastActivity.takeIf { lastPackage == pkg && it.isNotEmpty() }
+            ?.substringAfterLast('.')
+        val keyboard = windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        return buildString {
+            append("app: ").append(pkg.ifEmpty { "?" })
+            act?.let { append('/').append(it) }
+            append(" · ").append(w).append('x').append(h)
+            if (keyboard) append(" · keyboard shown")
+        }
+    }
+
+    private fun toUiNode(n: AccessibilityNodeInfo, depth: Int, budget: IntArray): UiNode {
+        budget[0]--
+        val r = Rect().also { n.getBoundsInScreen(it) }
+        val kids = if (depth >= 50 || budget[0] <= 0) emptyList() else buildList {
+            for (i in 0 until min(n.childCount, 80)) {
+                if (budget[0] <= 0) break
+                n.getChild(i)?.let { add(toUiNode(it, depth + 1, budget)) }
+            }
+        }
+        val actions = n.actionList
+        return UiNode(
+            cls = n.className?.toString().orEmpty(),
+            text = n.text?.toString(),
+            desc = n.contentDescription?.toString(),
+            hint = n.hintText?.toString(),
+            viewId = n.viewIdResourceName,
+            bounds = Bounds(r.left, r.top, r.right, r.bottom),
+            clickable = n.isClickable,
+            longClickable = n.isLongClickable,
+            editable = n.isEditable,
+            scrollable = n.isScrollable,
+            checkable = n.isCheckable,
+            checked = n.isChecked,
+            selected = n.isSelected,
+            focused = n.isFocused,
+            enabled = n.isEnabled,
+            visible = n.isVisibleToUser,
+            password = n.isPassword,
+            canScrollForward = actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_FORWARD },
+            canScrollBackward = actions.any { it.id == AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD },
+            children = kids,
+            handle = n,
+        )
+    }
 
     fun dumpTree(maxDepth: Int = 30, packageFilter: String = ""): JSONObject {
         // A package filter may name a non-active window (IME, overlay,
@@ -263,43 +418,70 @@ class A11yService : AccessibilityService() {
         return gesture(path, 60)
     }
 
+    /** Node named by a model selector: visible text first, then
+     *  content-description (icons are usually labelled only by that). */
+    private fun findByLabel(text: String?, desc: String?, resId: String?): AccessibilityNodeInfo? {
+        if (text != null && desc == null && resId == null) {
+            return findFirstNode(text, null, null) ?: findFirstNode(null, text, null)
+        }
+        return findFirstNode(text, desc, resId)
+    }
+
+    /** Click [node] or its nearest clickable ancestor (bounded, so a
+     *  whole-screen container is never hit); gesture on it otherwise. */
+    private suspend fun clickNode(node: AccessibilityNodeInfo): Pair<Boolean, String> {
+        var n: AccessibilityNodeInfo? = node
+        var hops = 0
+        while (n != null && !(n.isClickable && n.isEnabled) && hops < MAX_CLICK_HOPS) {
+            n = n.parent; hops++
+        }
+        if (n != null && n.isClickable && n.isEnabled &&
+            n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        ) {
+            return true to "node_click"
+        }
+        val r = Rect(); node.getBoundsInScreen(r)
+        if (r.isEmpty) return false to "element has no on-screen bounds"
+        return tap(r.exactCenterX(), r.exactCenterY()) to "gesture"
+    }
+
     suspend fun tapOrNode(
+        ref: Int?,
         x: Float?, y: Float?,
         text: String?, desc: String?, resId: String?,
     ): Pair<Boolean, String> {
+        if (ref != null) {
+            val node = nodeFor(ref) ?: return false to staleRef(ref)
+            return clickNode(node)
+        }
         if (text != null || desc != null || resId != null) {
-            val node = findFirstNode(text, desc, resId) ?: return false to "no matching node"
-            // Labels are rarely clickable themselves — click the nearest
-            // clickable ancestor (bounded, so we don't hit a whole-screen
-            // container), which is more reliable than coordinates.
-            var n: AccessibilityNodeInfo? = node
-            var hops = 0
-            while (n != null && !(n.isClickable && n.isEnabled) && hops < MAX_CLICK_HOPS) {
-                n = n.parent; hops++
-            }
-            if (n != null && n.isClickable && n.isEnabled &&
-                n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            ) {
-                return true to "node_click"
-            }
-            val r = Rect(); node.getBoundsInScreen(r)
-            if (r.isEmpty) return false to "node has no on-screen bounds"
-            return tap(r.exactCenterX(), r.exactCenterY()) to "gesture"
+            val node = findByLabel(text, desc, resId) ?: return false to "no matching element"
+            return clickNode(node)
         }
         if (x != null && y != null) return tap(x, y) to "gesture"
-        return false to "no target"
+        return false to "give ref, text, or x and y"
     }
 
     suspend fun longPress(
-        x: Float?, y: Float?, text: String?, desc: String?, resId: String?, durationMs: Long,
-    ): Boolean {
-        val (cx, cy) = if (x != null && y != null) x to y else {
-            val node = findFirstNode(text, desc, resId) ?: return false
+        ref: Int?, x: Float?, y: Float?, text: String?, desc: String?, resId: String?,
+        durationMs: Long,
+    ): Pair<Boolean, String> {
+        val node = when {
+            ref != null -> nodeFor(ref) ?: return false to staleRef(ref)
+            x != null && y != null -> null
+            else -> findByLabel(text, desc, resId) ?: return false to "no matching element"
+        }
+        if (node != null && node.isLongClickable &&
+            node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+        ) {
+            return true to "node_long_click"
+        }
+        val (cx, cy) = if (node != null) {
             val r = Rect(); node.getBoundsInScreen(r)
             r.exactCenterX() to r.exactCenterY()
-        }
+        } else x!! to y!!
         val path = Path().apply { moveTo(c(cx), c(cy)) }
-        return gesture(path, durationMs)
+        return gesture(path, durationMs) to "gesture"
     }
 
     suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {
@@ -321,44 +503,102 @@ class A11yService : AccessibilityService() {
         )
     }
 
+    /** The biggest visible scrollable node — "the list" of a screen. */
+    private fun mainScrollable(): AccessibilityNodeInfo? {
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = 0L
+        fun walk(n: AccessibilityNodeInfo, depth: Int) {
+            if (depth > 40 || !n.isVisibleToUser) return
+            if (n.isScrollable) {
+                val r = Rect(); n.getBoundsInScreen(r)
+                val area = r.width().toLong() * r.height()
+                if (area > bestArea) { best = n; bestArea = area }
+            }
+            for (i in 0 until min(n.childCount, 80)) n.getChild(i)?.let { walk(it, depth + 1) }
+        }
+        activeRoots().forEach { walk(it, 0) }
+        return best
+    }
+
     /**
      * `direction` is where to move in the content: "down" reveals what is
-     * below (finger travels up), like scrolling a page. With [text], the
-     * swipe runs inside that node's nearest scrollable ancestor.
+     * below (finger travels up), like scrolling a page. Targets the list at
+     * [ref] / containing [text], else the screen's main list. Uses the
+     * list's own scroll action when it has one (exact, no gesture
+     * physics); swipes otherwise.
      */
-    suspend fun scroll(direction: String, text: String?, times: Int): Pair<Boolean, String> {
+    suspend fun scroll(direction: String, ref: Int?, text: String?, times: Int): Pair<Boolean, String> {
+        val dir = direction.lowercase()
+        if (dir !in setOf("up", "down", "left", "right")) {
+            return false to "direction must be up, down, left or right"
+        }
+        val target = when {
+            ref != null -> nodeFor(ref) ?: return false to staleRef(ref)
+            text != null -> findByLabel(text, null, null) ?: return false to "no matching element"
+            else -> null
+        }
+        var list = target
+        while (list != null && !list.isScrollable) list = list.parent
+        if (list == null && target == null) list = mainScrollable()
+
         val area = Rect()
-        if (text != null) {
-            val node = findFirstNode(text, null, null) ?: return false to "no matching node"
-            var n: AccessibilityNodeInfo? = node
-            while (n != null && !n.isScrollable) n = n.parent
-            (n ?: node).getBoundsInScreen(area)
-            if (area.isEmpty) return false to "node has no on-screen bounds"
-        } else {
+        if (list != null) list.getBoundsInScreen(area) else {
             val (w, h) = screenSize()
             area.set(0, 0, w, h)
         }
-        val cx = area.exactCenterX()
-        val cy = area.exactCenterY()
-        val dx = area.width() * 0.35f
-        val dy = area.height() * 0.35f
+        if (area.isEmpty) return false to "list has no on-screen bounds"
+        var via = "gesture"
         repeat(times.coerceIn(1, 10)) {
-            val ok = when (direction.lowercase()) {
-                "down" -> swipe(cx, cy + dy, cx, cy - dy, 350)
-                "up" -> swipe(cx, cy - dy, cx, cy + dy, 350)
-                "right" -> swipe(cx + dx, cy, cx - dx, cy, 350)
-                "left" -> swipe(cx - dx, cy, cx + dx, cy, 350)
-                else -> return false to "direction must be up, down, left or right"
+            val acted = list?.let { performScroll(it, dir, area) } == true
+            if (acted) via = "scroll_action" else {
+                val cx = area.exactCenterX()
+                val cy = area.exactCenterY()
+                val dx = area.width() * 0.35f
+                val dy = area.height() * 0.35f
+                val ok = when (dir) {
+                    "down" -> swipe(cx, cy + dy, cx, cy - dy, 350)
+                    "up" -> swipe(cx, cy - dy, cx, cy + dy, 350)
+                    "right" -> swipe(cx + dx, cy, cx - dx, cy, 350)
+                    else -> swipe(cx - dx, cy, cx + dx, cy, 350)
+                }
+                if (!ok) return false to "gesture cancelled"
             }
-            if (!ok) return false to "gesture cancelled"
             delay(150)
         }
-        return true to if (text != null) "node" else "screen"
+        return true to via
     }
 
-    suspend fun typeText(text: String, selText: String?, selDesc: String?, selId: String?): Pair<Boolean, String> {
-        val node = findFirstEditable(selText, selDesc, selId)
-            ?: return false to "no editable node found"
+    private fun performScroll(n: AccessibilityNodeInfo, dir: String, area: Rect): Boolean {
+        val directional = when (dir) {
+            "down" -> AccessibilityAction.ACTION_SCROLL_DOWN
+            "up" -> AccessibilityAction.ACTION_SCROLL_UP
+            "right" -> AccessibilityAction.ACTION_SCROLL_RIGHT
+            else -> AccessibilityAction.ACTION_SCROLL_LEFT
+        }
+        if (n.actionList.any { it.id == directional.id } && n.performAction(directional.id)) {
+            return true
+        }
+        // Forward/backward run along the list's own axis only.
+        val horizontal = area.width() > area.height()
+        val alongAxis = if (horizontal) dir == "left" || dir == "right" else dir == "up" || dir == "down"
+        if (!alongAxis) return false
+        val forward = dir == "down" || dir == "right"
+        return n.performAction(
+            if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD,
+        )
+    }
+
+    suspend fun typeText(
+        text: String, ref: Int?, selText: String?, selDesc: String?, selId: String?,
+        submit: Boolean,
+    ): Pair<Boolean, String> {
+        val node = if (ref != null) {
+            val n = nodeFor(ref) ?: return false to staleRef(ref)
+            if (n.isEditable) n else editableIn(n) ?: return false to "element [$ref] is not a text field"
+        } else {
+            findFirstEditable(selText, selDesc, selId) ?: return false to "no editable field found"
+        }
         if (!node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)) {
             node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
@@ -366,9 +606,27 @@ class A11yService : AccessibilityService() {
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        return ok to if (ok) "set_text" else "set_text_failed"
+        if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+            return false to "set_text_failed"
+        }
+        if (!submit) return true to "set_text"
+        delay(80)
+        node.refresh()
+        return if (imeEnter(node)) true to "set_text+enter" else false to "set_text; enter not supported"
     }
+
+    private fun editableIn(n: AccessibilityNodeInfo, depth: Int = 0): AccessibilityNodeInfo? {
+        if (n.isEditable) return n
+        if (depth > 8) return null
+        for (i in 0 until min(n.childCount, 40)) {
+            n.getChild(i)?.let { c -> editableIn(c, depth + 1)?.let { return it } }
+        }
+        return null
+    }
+
+    /** The keyboard's action key (enter / search / go / send) on [node]. */
+    private fun imeEnter(node: AccessibilityNodeInfo): Boolean =
+        node.performAction(AccessibilityAction.ACTION_IME_ENTER.id)
 
     fun globalKey(name: String): Boolean = when (name.lowercase()) {
         "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
@@ -378,6 +636,7 @@ class A11yService : AccessibilityService() {
         "quick_settings" -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)
         "power_dialog" -> performGlobalAction(GLOBAL_ACTION_POWER_DIALOG)
         "lock" -> performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+        "enter" -> findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.let { imeEnter(it) } == true
         else -> false
     }
 
@@ -389,38 +648,99 @@ class A11yService : AccessibilityService() {
         while (System.currentTimeMillis() < deadline) {
             if (pkg != null && foregroundPackage() == pkg) return true
             if ((text != null || desc != null || resId != null) &&
-                findFirstNode(text, desc, resId) != null) return true
+                findByLabel(text, desc, resId) != null) return true
             delay(200)
         }
         return false
     }
 
-    suspend fun screenshot(): ByteArray? {
+    /** Raw screenshot as a software bitmap (retries once on the 1 s
+     *  rate limit). */
+    private suspend fun captureBitmap(retry: Boolean = true): Bitmap? {
         if (Build.VERSION.SDK_INT < 30) return null
-        return suspendCancellableCoroutine { cont ->
+        var code = 0
+        val bmp = suspendCancellableCoroutine { cont ->
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 mainExecutor,
                 object : TakeScreenshotCallback {
                     override fun onSuccess(shot: ScreenshotResult) {
-                        runCatching {
+                        val sw = runCatching {
                             val hw = Bitmap.wrapHardwareBuffer(shot.hardwareBuffer, shot.colorSpace)
-                            shot.hardwareBuffer.close()
-                            val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false) ?: hw
-                            val baos = ByteArrayOutputStream()
-                            bmp?.compress(Bitmap.CompressFormat.JPEG, 70, baos)
-                            cont.resume(baos.toByteArray())
-                        }.onFailure { cont.resume(null) }
+                            hw?.copy(Bitmap.Config.ARGB_8888, true).also { hw?.recycle() }
+                        }.getOrNull()
+                        shot.hardwareBuffer.close()
+                        cont.resume(sw)
                     }
-                    override fun onFailure(errorCode: Int) = cont.resume(null)
+                    override fun onFailure(errorCode: Int) {
+                        code = errorCode
+                        cont.resume(null)
+                    }
                 },
             )
         }
+        if (bmp == null && retry && code == ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT) {
+            delay(1100)
+            return captureBitmap(retry = false)
+        }
+        return bmp
+    }
+
+    /** Full-resolution JPEG (Tools playground / `screenshot` without marks). */
+    suspend fun screenshot(): ByteArray? {
+        val bmp = captureBitmap() ?: return null
+        return ByteArrayOutputStream().also {
+            bmp.compress(Bitmap.CompressFormat.JPEG, 70, it)
+            bmp.recycle()
+        }.toByteArray()
+    }
+
+    /**
+     * Vision screenshot: downscaled to [maxSide] and with every visible
+     * element's ref drawn as a numbered box (set-of-marks), so the model
+     * can answer "tap ref=12" from what it sees. Returns the JPEG and the
+     * matching text screen.
+     */
+    suspend fun markedScreenshot(maxSide: Int = 1024): Pair<ByteArray, Screen>? {
+        val screen = snapshot()
+        val src = captureBitmap() ?: return null
+        val scale = min(1f, maxSide.toFloat() / maxOf(src.width, src.height))
+        val bmp = if (scale < 1f) {
+            Bitmap.createScaledBitmap(
+                src, (src.width * scale).toInt(), (src.height * scale).toInt(), true,
+            ).also { src.recycle() }
+        } else src
+        val out = if (bmp.isMutable) bmp else bmp.copy(Bitmap.Config.ARGB_8888, true)
+        val canvas = Canvas(out)
+        val box = Paint().apply {
+            style = Paint.Style.STROKE; strokeWidth = 2f; color = MARK_COLOR; isAntiAlias = true
+        }
+        val tagBg = Paint().apply { style = Paint.Style.FILL; color = MARK_COLOR }
+        val tagText = Paint().apply {
+            color = Color.WHITE; textSize = 13f; isAntiAlias = true; isFakeBoldText = true
+        }
+        screen.elements.filter { it.ref in screen.shownRefs }.forEach { e ->
+            val r = RectF(
+                e.bounds.l * scale, e.bounds.t * scale, e.bounds.r * scale, e.bounds.b * scale,
+            )
+            canvas.drawRect(r, box)
+            val label = e.ref.toString()
+            val w = tagText.measureText(label) + 6f
+            canvas.drawRect(r.left, r.top, r.left + w, r.top + 16f, tagBg)
+            canvas.drawText(label, r.left + 3f, r.top + 13f, tagText)
+        }
+        val jpeg = ByteArrayOutputStream().also {
+            out.compress(Bitmap.CompressFormat.JPEG, 60, it)
+        }.toByteArray()
+        out.recycle()
+        return jpeg to screen
     }
 
     companion object {
         private const val MAX_TREE_NODES = 250
+        private const val MAX_SNAPSHOT_NODES = 1500
         private const val MAX_CLICK_HOPS = 4
+        private val MARK_COLOR = Color.rgb(230, 30, 30)
 
         /** Model-supplied selector: regex when valid, else a literal —
          *  "Settings (Beta)" or "$5" must not throw. */

@@ -38,79 +38,69 @@ import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.StatusPill
 import com.boxagent.app.ui.components.bwTextFieldColors
 import com.boxagent.app.ui.theme.BwShape
+import com.boxagent.app.ui.components.ListGroup
+import com.boxagent.app.ui.components.ListRow
+import com.boxagent.app.ui.components.SearchField
+import com.boxagent.app.ui.components.Tag
+import com.boxagent.app.ui.components.ToolLook
 import kotlinx.coroutines.launch
 
 @Composable
 fun ToolsScreen(app: BoxAgentApp) {
-    var query by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf<ToolSpec?>(null) }
     val tools = remember { ToolCatalog.all() }
-
-    Column(Modifier.fillMaxSize()) {
-        Surface(
-            shape = BwShape.Pill,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-        ) {
-            TextField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = {
-                    Text(stringResource(R.string.search_tools), style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                },
-                textStyle = MaterialTheme.typography.bodyMedium,
-                singleLine = true,
-                colors = androidx.compose.material3.TextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                    focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                    unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        val filtered = tools.filter {
-            query.isEmpty() || it.name.contains(query, true) || it.summary.contains(query, true)
-        }
-        LazyColumn(
-            Modifier.weight(1f),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 4.dp),
-        ) {
-            items(filtered, key = { it.name }) { tool ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clickable { selected = tool }
-                        .padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(tool.name, style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                " · ${tool.backend}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Text(
-                            tool.summary,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    RiskBadge(tool.risk)
-                }
-                Hairline()
-            }
-        }
-    }
-
+    ToolsList(tools, onSelect = { selected = it })
     selected?.let { tool ->
         ToolDialog(app, tool, onDismiss = { selected = null })
+    }
+}
+
+/** Catalog grouped by backend, searchable. Stateless (screenshot-tested). */
+@Composable
+fun ToolsList(tools: List<ToolSpec>, onSelect: (ToolSpec) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val filtered = tools.filter {
+        query.isEmpty() || it.name.contains(query, true) || it.summary.contains(query, true)
+    }
+    val groups = listOf(
+        "a11y" to stringResource(R.string.tools_group_ui),
+        "shell" to stringResource(R.string.tools_group_shell),
+        "meta" to stringResource(R.string.tools_group_agent),
+    )
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(20.dp),
+    ) {
+        item(key = "search") {
+            SearchField(query, { query = it }, stringResource(R.string.search_tools), Modifier.padding(top = 4.dp))
+        }
+        groups.forEach { (backend, title) ->
+            val inGroup = filtered.filter { it.backend == backend }
+            if (inGroup.isNotEmpty()) {
+                item(key = backend) {
+                    ListGroup(header = "$title · ${inGroup.size}") {
+                        inGroup.forEachIndexed { i, tool ->
+                            ListRow(
+                                title = ToolLook.label(tool.name),
+                                // Summary often just repeats the label —
+                                // show the call name then.
+                                subtitle = tool.summary.takeIf {
+                                    !it.equals(ToolLook.label(tool.name), ignoreCase = true)
+                                } ?: tool.name,
+                                icon = ToolLook.icon(tool.name),
+                                divider = i < inGroup.lastIndex,
+                                onClick = { onSelect(tool) },
+                            ) {
+                                if (tool.risk != "readonly") {
+                                    Tag(riskLabel(tool.risk), strong = tool.risk == "destructive")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

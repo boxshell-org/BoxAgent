@@ -105,9 +105,13 @@ fun BoxAgentTheme(theme: String = "system", content: @Composable () -> Unit) {
         "dark" -> true
         else -> isSystemInDarkTheme()
     }
-    MaterialTheme(
-        colorScheme = if (dark) DarkColors else LightColors,
-        typography = BwTypography,
-        content = content,
-    )
+    val colors = if (dark) DarkColors else LightColors
+    MaterialTheme(colorScheme = colors, typography = BwTypography) {
+        // Text/icons drawn straight on the background (not inside a
+        // Surface) would otherwise fall back to black — invisible in dark.
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.material3.LocalContentColor provides colors.onBackground,
+            content = content,
+        )
+    }
 }

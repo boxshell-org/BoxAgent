@@ -11,6 +11,8 @@ import com.boxagent.app.data.Settings
 import com.boxagent.app.data.db.AppDb
 import com.boxagent.app.data.db.AuditEntry
 import com.boxagent.app.service.AgentService
+import com.boxagent.app.skills.SkillRepository
+import com.boxagent.app.agent.ToolCatalog
 import com.boxagent.app.util.LocaleHelper
 import com.boxagent.app.work.HealthWorker
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +30,7 @@ class BoxAgentApp : Application() {
     lateinit var secrets: Secrets private set
     lateinit var db: AppDb private set
     lateinit var daemon: DaemonManager private set
+    lateinit var skills: SkillRepository private set
     lateinit var toolRunner: ToolRunner private set
     lateinit var agent: AgentController private set
 
@@ -45,13 +48,20 @@ class BoxAgentApp : Application() {
         secrets = Secrets(this)
         db = AppDb.get(this)
         daemon = DaemonManager(this, settings, secrets)
-        toolRunner = ToolRunner(this, daemon, settings, db)
-        agent = AgentController(this, settings, secrets, toolRunner, db, daemon)
+        skills = SkillRepository(db, settings) {
+            runCatching { ToolCatalog.all().map { it.name }.toSet() }.getOrNull()
+        }
+        toolRunner = ToolRunner(this, daemon, settings, db, skills)
+        agent = AgentController(this, settings, secrets, toolRunner, db, daemon, skills)
 
         LocaleHelper.init(this)
         Notifier.ensureChannel(this)
         HealthWorker.schedule(this)
 
+        // Built-in skills, in the UI language (once per built-in).
+        appScope.launch {
+            runCatching { skills.seedBuiltins(java.util.Locale.getDefault().language) }
+        }
         // Reconnect to a live daemon; start the FGS when shell is online so
         // the watchdog survives backgrounding.
         appScope.launch {

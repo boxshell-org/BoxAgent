@@ -94,7 +94,7 @@ fun SettingsScreen(app: BoxAgentApp) {
             val m = mdl
             val t = tempStr.toDoubleOrNull() ?: 0.2
             val tok = tokStr.toIntOrNull() ?: 4096
-            val prompt = sysPrompt.ifEmpty { Settings.DEFAULT_SYSTEM_PROMPT }
+            val prompt = sysPrompt.trim()
             kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
                 s.setLlm(u, m, t, tok)
                 s.setSystemPrompt(prompt)
@@ -244,12 +244,35 @@ fun SettingsScreen(app: BoxAgentApp) {
                         Modifier.weight(1f))
                 }
                 SettingField(stringResource(R.string.system_prompt), sysPrompt, { sysPrompt = it }, lines = 4)
+                Text(
+                    stringResource(R.string.system_prompt_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 val compactTools by s.compactTools.collectAsState(initial = true)
                 ToggleRow(stringResource(R.string.compact_tools), compactTools) {
                     scope.launch { s.setCompactTools(it) }
                 }
                 Text(
                     stringResource(R.string.compact_tools_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val vision by s.vision.collectAsState(initial = false)
+                ToggleRow(stringResource(R.string.vision), vision) {
+                    scope.launch { s.setVision(it) }
+                }
+                Text(
+                    stringResource(R.string.vision_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val learn by s.learnSkills.collectAsState(initial = true)
+                ToggleRow(stringResource(R.string.learn_skills), learn) {
+                    scope.launch { s.setLearnSkills(it) }
+                }
+                Text(
+                    stringResource(R.string.learn_skills_desc),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -260,7 +283,7 @@ fun SettingsScreen(app: BoxAgentApp) {
                             s.setLlm(url, mdl,
                                 tempStr.toDoubleOrNull() ?: 0.2,
                                 tokStr.toIntOrNull() ?: 4096)
-                            s.setSystemPrompt(sysPrompt.ifEmpty { Settings.DEFAULT_SYSTEM_PROMPT })
+                            s.setSystemPrompt(sysPrompt.trim())
                         }
                     })
                     PillButton(stringResource(R.string.test), filled = false, onClick = {

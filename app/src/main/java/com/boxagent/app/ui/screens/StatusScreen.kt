@@ -4,7 +4,27 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings as AndroidSettings
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Accessibility
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.BatteryChargingFull
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.automirrored.rounded.MenuBook
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
+import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.boxagent.app.ui.components.CircleIconButton
+import com.boxagent.app.ui.components.ListGroup
+import com.boxagent.app.ui.components.ListRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -47,89 +67,123 @@ fun StatusScreen(app: BoxAgentApp) {
     var showPair by remember { mutableStateOf(false) }
     var showConnect by remember { mutableStateOf(false) }
     var showGuide by remember { mutableStateOf(false) }
+    var showLogs by remember { mutableStateOf(false) }
     var probe by remember { mutableStateOf<String?>(null) }
 
     if (showGuide) {
         PermissionsGuideScreen(app, onBack = { showGuide = false })
         return
     }
+    if (showLogs) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircleIconButton(Icons.AutoMirrored.Rounded.ArrowBack, stringResource(R.string.back), { showLogs = false })
+                Text(stringResource(R.string.audit_log), style = MaterialTheme.typography.titleLarge)
+            }
+            Box(Modifier.weight(1f)) { LogsScreen(app) }
+        }
+        return
+    }
 
+    val a11y = A11yService.isGranted(ctx)
     Column(
         Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 20.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(22.dp),
     ) {
-        SectionLabel(stringResource(R.string.capabilities))
-        BwCard(Modifier.fillMaxWidth()) {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                CapabilityRow(stringResource(R.string.shell_daemon), st.shell == ShellState.ONLINE,
-                    when (st.shell) {
-                        ShellState.ONLINE ->
-                            if (st.daemonVersion.isEmpty()) "uid 2000"
-                            else "uid 2000 · v${st.daemonVersion}"
-                        ShellState.PAIRING -> stringResource(R.string.d_pairing)
-                        ShellState.CONNECTING -> stringResource(R.string.d_connecting)
-                        ShellState.ERROR -> daemonDetail(st.detail)
-                        else -> stringResource(R.string.d_offline)
-                    })
-                CapabilityRow(stringResource(R.string.accessibility),
-                    A11yService.isGranted(ctx),
-                    stringResource(
-                        if (A11yService.isGranted(ctx))
-                            R.string.status_enabled else R.string.status_off,
-                    ))
-                CapabilityRow(stringResource(R.string.keep_alive), true,
-                    stringResource(R.string.keep_alive_detail))
-            }
+        ListGroup(header = stringResource(R.string.capabilities)) {
+            CapabilityRow(
+                Icons.Rounded.Terminal, stringResource(R.string.shell_daemon), st.shell == ShellState.ONLINE,
+                when (st.shell) {
+                    ShellState.ONLINE ->
+                        if (st.daemonVersion.isEmpty()) "uid 2000"
+                        else "uid 2000 · v${st.daemonVersion}"
+                    ShellState.PAIRING -> stringResource(R.string.d_pairing)
+                    ShellState.CONNECTING -> stringResource(R.string.d_connecting)
+                    ShellState.ERROR -> daemonDetail(st.detail)
+                    else -> stringResource(R.string.d_offline)
+                },
+                divider = true,
+            )
+            CapabilityRow(
+                Icons.Rounded.Accessibility, stringResource(R.string.accessibility), a11y,
+                stringResource(if (a11y) R.string.status_enabled else R.string.status_off),
+                divider = true,
+            )
+            CapabilityRow(
+                Icons.Rounded.Favorite, stringResource(R.string.keep_alive), true,
+                stringResource(R.string.keep_alive_detail),
+            )
         }
 
-        SectionLabel(stringResource(R.string.actions))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton(stringResource(R.string.reconnect), filled = false, onClick = {
-                scope.launch { app.daemon.reconnect() }
-            })
-            PillButton(stringResource(R.string.re_pair), filled = false, onClick = { showPair = true })
-            PillButton(stringResource(R.string.connect), filled = false, onClick = { showConnect = true })
-            PillButton(stringResource(R.string.guide_title), filled = false, onClick = { showGuide = true })
+        ListGroup(header = stringResource(R.string.actions)) {
+            ListRow(stringResource(R.string.reconnect), icon = Icons.Rounded.Sync, divider = true,
+                onClick = { scope.launch { app.daemon.reconnect() } })
+            ListRow(stringResource(R.string.re_pair), icon = Icons.Rounded.Link, divider = true,
+                onClick = { showPair = true })
+            ListRow(stringResource(R.string.connect), icon = Icons.Rounded.PlayArrow, divider = true,
+                onClick = { showConnect = true })
+            ListRow(stringResource(R.string.enable_a11y), icon = Icons.Rounded.Accessibility, divider = true,
+                onClick = {
+                    ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                })
+            ListRow(stringResource(R.string.battery), icon = Icons.Rounded.BatteryChargingFull, divider = true,
+                onClick = {
+                    ctx.startActivity(
+                        Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(Uri.parse("package:${ctx.packageName}"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                })
+            ListRow(stringResource(R.string.probe), icon = Icons.Rounded.Terminal, divider = true,
+                onClick = {
+                    scope.launch {
+                        probe = runCatching {
+                            app.daemon.requireClient().exec("id; uname -a").stdout
+                        }.getOrElse { it.message ?: ctx.getString(R.string.error_generic) }
+                    }
+                })
+            ListRow(stringResource(R.string.guide_title), icon = Icons.AutoMirrored.Rounded.MenuBook,
+                onClick = { showGuide = true })
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PillButton(stringResource(R.string.enable_a11y), filled = false, onClick = {
-                ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            })
-            PillButton(stringResource(R.string.battery), filled = false, onClick = {
-                ctx.startActivity(
-                    Intent(AndroidSettings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                        .setData(Uri.parse("package:${ctx.packageName}"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            })
-            PillButton(stringResource(R.string.probe), filled = false, onClick = {
-                scope.launch {
-                    probe = runCatching {
-                        app.daemon.requireClient().exec("id; uname -a").stdout
-                    }.getOrElse { it.message ?: ctx.getString(R.string.error_generic) }
-                }
-            })
+
+        ListGroup {
+            ListRow(
+                stringResource(R.string.audit_log),
+                subtitle = stringResource(R.string.audit_log_desc),
+                icon = Icons.AutoMirrored.Rounded.ReceiptLong,
+                onClick = { showLogs = true },
+            ) { Chevron() }
         }
 
         st.detail.takeIf { it.isNotEmpty() }?.let {
-            SectionLabel(stringResource(R.string.detail))
-            MonoText(daemonDetail(it))
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionLabel(stringResource(R.string.detail))
+                MonoText(daemonDetail(it))
+            }
         }
         probe?.let {
-            SectionLabel(stringResource(R.string.probe_output))
-            MonoText(it)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionLabel(stringResource(R.string.probe_output))
+                MonoText(it)
+            }
         }
 
-        SectionLabel(stringResource(R.string.how_it_works))
-        Text(
-            stringResource(R.string.how_it_works_body),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            SectionLabel(stringResource(R.string.how_it_works))
+            Text(
+                stringResource(R.string.how_it_works_body),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Box(Modifier.height(12.dp))
     }
 
     if (showPair) {
@@ -162,20 +216,19 @@ fun StatusScreen(app: BoxAgentApp) {
 }
 
 @Composable
-private fun CapabilityRow(name: String, on: Boolean, detail: String) {
-    Row(
-        Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            com.boxagent.app.ui.components.StatusDot(on)
-            Text(name, style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(start = 10.dp))
-        }
-        Text(detail, style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun CapabilityRow(icon: ImageVector, name: String, on: Boolean, detail: String, divider: Boolean = false) {
+    ListRow(name, subtitle = detail, icon = icon, divider = divider) {
+        com.boxagent.app.ui.components.StatusDot(on, size = 10.dp)
     }
+}
+
+@Composable
+private fun Chevron() {
+    Icon(
+        Icons.Rounded.ChevronRight, null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(20.dp),
+    )
 }
 
 @Composable
