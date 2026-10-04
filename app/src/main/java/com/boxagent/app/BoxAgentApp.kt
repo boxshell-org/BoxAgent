@@ -14,6 +14,7 @@ import com.boxagent.app.service.AgentService
 import com.boxagent.app.skills.SkillRepository
 import com.boxagent.app.agent.ToolCatalog
 import com.boxagent.app.util.LocaleHelper
+import com.boxagent.app.vscreen.VScreenManager
 import com.boxagent.app.work.HealthWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,7 @@ class BoxAgentApp : Application() {
     lateinit var db: AppDb private set
     lateinit var daemon: DaemonManager private set
     lateinit var skills: SkillRepository private set
+    lateinit var vscreen: VScreenManager private set
     lateinit var toolRunner: ToolRunner private set
     lateinit var agent: AgentController private set
 
@@ -51,7 +53,8 @@ class BoxAgentApp : Application() {
         skills = SkillRepository(db, settings) {
             runCatching { ToolCatalog.all().map { it.name }.toSet() }.getOrNull()
         }
-        toolRunner = ToolRunner(this, daemon, settings, db, skills)
+        vscreen = VScreenManager(this, settings, secrets, daemon)
+        toolRunner = ToolRunner(this, daemon, settings, db, skills, vscreen)
         agent = AgentController(this, settings, secrets, toolRunner, db, daemon, skills)
 
         LocaleHelper.init(this)

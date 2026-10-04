@@ -12,6 +12,8 @@ import com.boxagent.app.data.db.AppDb
 import com.boxagent.app.data.db.AuditEntry
 import com.boxagent.app.data.db.ToolCallRecord
 import com.boxagent.app.service.A11yService
+import com.boxagent.app.vscreen.VScreenClient
+import com.boxagent.app.vscreen.VScreenManager
 import com.boxagent.app.skills.SkillCodec
 import com.boxagent.app.skills.SkillRepository
 import com.boxagent.app.skills.SkillStep
@@ -46,6 +48,7 @@ class ToolRunner(
     private val settings: Settings,
     private val db: AppDb,
     private val skills: SkillRepository,
+    private val vscreen: VScreenManager,
 ) {
     private val _pending = MutableStateFlow<PendingConfirm?>(null)
     val pending: StateFlow<PendingConfirm?> = _pending
@@ -170,6 +173,15 @@ class ToolRunner(
     }
 
     private suspend fun dispatch(name: String, a: JSONObject): JSONObject {
+        // Virtual screen: display-semantic tools must reach the VD — an
+        // error here beats silently tapping the user's physical screen.
+        val vdOn = settings.vscreen.first()
+        val vs = if (vdOn && name in VD_SCOPED) vscreen.ready() else null
+        if (vdOn && name in VD_SCOPED && vs == null) {
+            return err(IllegalStateException(
+                "virtual screen unavailable: " +
+                    vscreen.status.value.detail.ifEmpty { "host not running" }))
+        }
         return when (name) {
             // -------- meta handled here (task_done/ask_user handled in Rust) --
             "notify" -> {
@@ -222,7 +234,15 @@ class ToolRunner(
                     clsPart.contains(".") -> clsPart
                     else -> "$compPkg.$clsPart"
                 }
-                val launched = runCatching {
+                val launched = if (vs != null) {
+                    // Virtual screen: am needs --display (monkey has none).
+                    val compName = if (comp.isNotEmpty()) "$compPkg/$cls"
+                        else context.packageManager.getLaunchIntentForPackage(pkg)
+                            ?.component?.let { "${it.packageName}/${it.className}" }
+                            ?: return err(IllegalStateException(
+                                "no launcher activity for $pkg"))
+                    shellExec("am start --display ${vscreen.displayId} -n ${sq(compName)}")
+                } else runCatching {
                     val intent = if (comp.isNotEmpty()) {
                         Intent().setComponent(android.content.ComponentName(compPkg, cls))
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -247,8 +267,24 @@ class ToolRunner(
             )
             "app_uninstall" -> shellExec("pm uninstall ${sq(a.getString("package"))}")
             "app_clear_data" -> shellExec("pm clear ${sq(a.getString("package"))}")
-            "screen_capture" -> screencapResult()
-            "screen_info" -> runCatching {
+            "screen_capture" -> if (vs != null) {
+                runCatching {
+                    val png = vs.screenshot()
+                        ?: throw IllegalStateException("no frame rendered yet")
+                    ok().put("mime", "image/png")
+                        .put("data_b64", Base64.encodeToString(png, Base64.NO_WRAP))
+                }.getOrElse { err(it) }
+            } else screencapResult()
+            "screen_info" -> if (vs != null) {
+                val st = vscreen.status.value
+                ok().put("width", st.w)
+                    .put("height", st.h)
+                    .put("density_dpi", st.dpi)
+                    .put("density", st.dpi / 160.0)
+                    .put("rotation", 0)
+                    .put("display_id", st.displayId)
+                    .put("virtual", true)
+            } else runCatching {
                 // Real size incl. system bars — the coordinate space gestures
                 // use. App displayMetrics exclude the bars and ignore rotation.
                 val dmgr = context.getSystemService(Context.DISPLAY_SERVICE)
@@ -353,12 +389,29 @@ class ToolRunner(
             }.getOrElse {
                 shellExec("cmd clipboard set ${sq(a.getString("text"))}")
             }
-            "input_tap" -> shellExec("input tap ${a.getInt("x")} ${a.getInt("y")}")
-            "input_swipe" -> shellExec(
+            "input_tap" -> if (vs != null) {
+                runCatching { vs.tap(a.getDouble("x"), a.getDouble("y")); ok() }
+                    .getOrElse { err(it) }
+            } else shellExec("input tap ${a.getInt("x")} ${a.getInt("y")}")
+            "input_swipe" -> if (vs != null) {
+                runCatching {
+                    vs.swipe(
+                        a.getDouble("x1"), a.getDouble("y1"),
+                        a.getDouble("x2"), a.getDouble("y2"),
+                        a.optLong("duration_ms", 300),
+                    ); ok()
+                }.getOrElse { err(it) }
+            } else shellExec(
                 "input swipe ${a.getInt("x1")} ${a.getInt("y1")} ${a.getInt("x2")} ${a.getInt("y2")} ${a.optInt("duration_ms", 300)}"
             )
-            "input_text" -> shellExec("input text ${sq(a.getString("text").replace(" ", "%s"))}")
-            "input_key" -> shellExec("input keyevent ${sq(a.getString("key"))}")
+            "input_text" -> if (vs != null) {
+                runCatching { vs.text(a.getString("text")); ok() }
+                    .getOrElse { err(it) }
+            } else shellExec("input text ${sq(a.getString("text").replace(" ", "%s"))}")
+            "input_key" -> if (vs != null) {
+                runCatching { vs.key(keyCodeOf(a.getString("key"))); ok() }
+                    .getOrElse { err(it) }
+            } else shellExec("input keyevent ${sq(a.getString("key"))}")
             // -------- a11y backend ----------
             "ui_tree" -> a11y {
                 it.dumpTree(a.optInt("max_depth", 30), a.optString("package"))
@@ -421,16 +474,31 @@ class ToolRunner(
                 )
                 // Some fields don't expose the IME action — the shell
                 // daemon (if up) can still press enter.
-                if (submit && !ok_ && via.startsWith("set_text;") && shellEnter()) {
-                    ok_ = true
-                    via = "set_text+keyevent_enter"
+                if (submit && !ok_ && via.startsWith("set_text;")) {
+                    val pressed = if (vs != null) {
+                        runCatching { vs.key(android.view.KeyEvent.KEYCODE_ENTER); true }
+                            .getOrDefault(false)
+                    } else shellEnter()
+                    if (pressed) {
+                        ok_ = true
+                        via = "set_text+keyevent_enter"
+                    }
                 }
                 result(ok_, via)
             }
             "key" -> acting(a) {
                 val key = a.getString("name")
-                var ok_ = it.globalKey(key)
-                if (!ok_ && key.equals("enter", ignoreCase = true)) ok_ = shellEnter()
+                var ok_ = if (vs != null) {
+                    VD_KEYS[key.lowercase()]
+                        ?.let { runCatching { vs.key(it); true }.getOrDefault(false) }
+                        ?: it.globalKey(key) // system-level keys stay global
+                } else it.globalKey(key)
+                if (!ok_ && key.equals("enter", ignoreCase = true)) {
+                    ok_ = if (vs != null) {
+                        runCatching { vs.key(android.view.KeyEvent.KEYCODE_ENTER); true }
+                            .getOrDefault(false)
+                    } else shellEnter()
+                }
                 result(ok_, if (ok_) key else "unsupported or failed: $key")
             }
             "wait_for" -> a11y { svc ->
@@ -442,7 +510,9 @@ class ToolRunner(
                     if (ok_) attachScreen(svc, a, r, settleMaxMs = 1500)
                 }
             }
-            "screenshot" -> a11y { svc ->
+            "screenshot" -> if (vs != null) {
+                vdScreenshot(vs)
+            } else a11y { svc ->
                 val shot = svc.markedScreenshot()
                 if (shot == null) {
                     JSONObject().put("ok", false)
@@ -454,7 +524,12 @@ class ToolRunner(
                 }
             }
             "launch_intent" -> {
-                val r = runCatching {
+                val r = if (vs != null) {
+                    // am start accepts intent: URIs and honors --display.
+                    val intentUri = intentFor(a.getString("uri").trim())
+                        .toUri(Intent.URI_INTENT_SCHEME)
+                    shellExec("am start --display ${vscreen.displayId} ${sq(intentUri)}")
+                } else runCatching {
                     context.startActivity(intentFor(a.getString("uri").trim()))
                     ok()
                 }.getOrElse { err(it) }
@@ -604,6 +679,33 @@ class ToolRunner(
             .put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
     }.getOrElse { err(it) }
 
+    /** Vision screenshot off the virtual display: host PNG + a11y ref
+     *  marks drawn on top (same set-of-marks shape the model knows). */
+    private suspend fun vdScreenshot(vs: VScreenClient): JSONObject {
+        val svc = A11yService.instance ?: A11yService.awaitInstance(2_500)
+            ?: return JSONObject().put("ok", false)
+                .put("error", "accessibility service not enabled")
+        return withContext(Dispatchers.Default) {
+            runCatching {
+                val png = vs.screenshot()
+                    ?: throw IllegalStateException("no frame rendered yet")
+                val screen = svc.snapshot()
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)
+                    ?: throw IllegalStateException("frame decode failed")
+                val jpeg = svc.markBitmap(bmp, screen)
+                ok().put("mime", "image/jpeg")
+                    .put("image_b64", Base64.encodeToString(jpeg, Base64.NO_WRAP))
+                    .put("screen", screen.render())
+            }.getOrElse { err(it) }
+        }
+    }
+
+    private fun keyCodeOf(name: String): Int {
+        name.toIntOrNull()?.let { return it }
+        return runCatching { android.view.KeyEvent.keyCodeFromString(name) }
+            .getOrDefault(android.view.KeyEvent.KEYCODE_UNKNOWN)
+    }
+
     private companion object {
         const val MAX_STDOUT = 6000
         const val MAX_STDERR = 1500
@@ -621,6 +723,23 @@ class ToolRunner(
         }
 
         val SETTINGS_NAMESPACES = setOf("system", "secure", "global")
+        /** Display-semantic tools: when the virtual screen is on these must
+         *  all run on it, never on the physical panel. */
+        val VD_SCOPED = setOf(
+            "screen", "ui_tree", "ui_find", "wait_for",
+            "tap", "long_press", "swipe", "scroll", "pinch", "type_text", "key",
+            "screenshot", "screen_capture", "screen_info",
+            "input_tap", "input_swipe", "input_text", "input_key",
+            "app_launch", "launch_intent",
+        )
+        /** Navigation keys the virtual display accepts by keycode; the
+         *  rest (notifications, power dialog…) are system-level globals. */
+        val VD_KEYS = mapOf(
+            "back" to android.view.KeyEvent.KEYCODE_BACK,
+            "home" to android.view.KeyEvent.KEYCODE_HOME,
+            "recents" to android.view.KeyEvent.KEYCODE_APP_SWITCH,
+            "enter" to android.view.KeyEvent.KEYCODE_ENTER,
+        )
         val ACTION_RE = Regex("""^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*\.[A-Z][A-Z0-9_]*$""")
         const val GRANT_FLAGS = Intent.FLAG_GRANT_READ_URI_PERMISSION or
             Intent.FLAG_GRANT_WRITE_URI_PERMISSION or

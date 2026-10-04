@@ -24,6 +24,7 @@ import com.boxagent.app.screen.RefTable
 import com.boxagent.app.screen.Screen
 import com.boxagent.app.screen.ScreenBuilder
 import com.boxagent.app.screen.UiNode
+import com.boxagent.app.vscreen.VScreenBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -102,9 +103,32 @@ class A11yService : AccessibilityService() {
     // ------------------------------------------------------------------
     // Reading
 
-    fun foregroundPackage(): String =
-        runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
+    // ------------------------------------------------------------------
+    // Virtual-display scoping (VScreenBridge is live when the agent runs
+    // on a virtual screen; empty/negative id means physical as usual).
+
+    /**
+     * Windows the agent may see — virtual display only while scoped.
+     * `getWindows()` is pinned to DEFAULT_DISPLAY in the framework, so
+     * scoped reads must go through `getWindowsOnAllDisplays()` instead.
+     */
+    private fun windowsForOps(): List<AccessibilityWindowInfo> {
+        val id = VScreenBridge.displayId
+        if (id < 0) return runCatching { windows }.getOrDefault(emptyList())
+        return runCatching { windowsOnAllDisplays?.get(id) }
+            .getOrNull() ?: emptyList()
+    }
+
+    fun foregroundPackage(): String {
+        if (VScreenBridge.displayId >= 0) {
+            // The VD's top app, not whatever holds focus on the panel.
+            val root = activeRoots().firstOrNull()
+            return runCatching { root?.packageName?.toString() }.getOrNull()
+                ?.ifEmpty { lastPackage } ?: lastPackage
+        }
+        return runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()
             ?.ifEmpty { lastPackage } ?: lastPackage
+    }
 
     /**
      * Node accessors can throw (`SecurityException` while windows change,
@@ -120,11 +144,22 @@ class A11yService : AccessibilityService() {
     private fun parentOf(n: AccessibilityNodeInfo): AccessibilityNodeInfo? =
         runCatching { n.parent }.getOrNull()
 
-    /** Roots to search: the active window(s), else the active-window root. */
-    private fun activeRoots(): List<AccessibilityNodeInfo> =
-        runCatching { windows.filter { it.isActive }.mapNotNull { it.root } }
-            .getOrDefault(emptyList())
-            .ifEmpty { listOfNotNull(runCatching { rootInActiveWindow }.getOrNull()) }
+    /** Roots to search: the active window(s), else the active-window root.
+     *  Virtual-display windows often never carry isActive (focus stays
+     *  with the panel's display group) — scoped mode falls back to the
+     *  VD's application windows. */
+    private fun activeRoots(): List<AccessibilityNodeInfo> {
+        val wins = windowsForOps()
+        val act = wins.filter { it.isActive }
+            .mapNotNull { runCatching { it.root }.getOrNull() }
+        if (act.isNotEmpty()) return act
+        if (VScreenBridge.displayId >= 0) {
+            return wins
+                .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                .mapNotNull { runCatching { it.root }.getOrNull() }
+        }
+        return listOfNotNull(runCatching { rootInActiveWindow }.getOrNull())
+    }
 
     // ------------------------------------------------------------------
     // Compact screen (the model's view) and refs
@@ -200,7 +235,7 @@ class A11yService : AccessibilityService() {
         val act = lastActivity.takeIf { lastPackage == pkg && it.isNotEmpty() }
             ?.substringAfterLast('.')
         val keyboard = runCatching {
-            windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+            windowsForOps().any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
         }.getOrDefault(false)
         return buildString {
             append("app: ").append(pkg.ifEmpty { "?" })
@@ -251,7 +286,7 @@ class A11yService : AccessibilityService() {
         // A package filter may name a non-active window (IME, overlay,
         // split screen) — search all of them for it.
         val byPkg = if (packageFilter.isEmpty()) emptyList()
-            else runCatching { windows.mapNotNull { it.root } }
+            else runCatching { windowsForOps().mapNotNull { it.root } }
                 .getOrDefault(emptyList()).filter { it.packageName == packageFilter }
         val roots = byPkg.ifEmpty { activeRoots() }
         val budget = intArrayOf(MAX_TREE_NODES)
@@ -453,6 +488,9 @@ class A11yService : AccessibilityService() {
         dispatch(GestureDescription.Builder().addStroke(stroke(path, durationMs)).build())
 
     private fun screenSize(): Pair<Int, Int> {
+        if (VScreenBridge.displayId >= 0 && VScreenBridge.width > 0) {
+            return VScreenBridge.width to VScreenBridge.height
+        }
         val dm = android.util.DisplayMetrics()
         val display = getSystemService(android.hardware.display.DisplayManager::class.java)
             .getDisplay(Display.DEFAULT_DISPLAY)
@@ -460,10 +498,30 @@ class A11yService : AccessibilityService() {
         return dm.widthPixels to dm.heightPixels
     }
 
-    suspend fun tap(x: Float, y: Float): Boolean {
-        val path = Path().apply { moveTo(c(x), c(y)) }
-        return gesture(path, 60)
-    }
+    // Touch routing: while scoped to a virtual display, coordinates live
+    // on that display and dispatchGesture can't reach them — the host
+    // injects instead. Otherwise the a11y gesture path runs as before.
+    private suspend fun touchTap(x: Float, y: Float): Boolean =
+        VScreenBridge.touchBackend?.tap(x, y) ?: run {
+            val path = Path().apply { moveTo(c(x), c(y)) }
+            gesture(path, 60)
+        }
+
+    private suspend fun touchHold(x: Float, y: Float, durationMs: Long): Boolean =
+        VScreenBridge.touchBackend?.hold(x, y, durationMs) ?: run {
+            val path = Path().apply { moveTo(c(x), c(y)) }
+            gesture(path, durationMs)
+        }
+
+    private suspend fun touchSwipe(
+        x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long,
+    ): Boolean =
+        VScreenBridge.touchBackend?.swipe(x1, y1, x2, y2, durationMs) ?: run {
+            val path = Path().apply { moveTo(c(x1), c(y1)); lineTo(c(x2), c(y2)) }
+            gesture(path, durationMs)
+        }
+
+    suspend fun tap(x: Float, y: Float): Boolean = touchTap(x, y)
 
     /** Node named by a model selector: visible text first, then
      *  content-description (icons are usually labelled only by that). */
@@ -537,16 +595,14 @@ class A11yService : AccessibilityService() {
                 r.exactCenterX() to r.exactCenterY()
             } else return false to "element has no on-screen bounds"
         } else x!! to y!!
-        val path = Path().apply { moveTo(c(cx), c(cy)) }
-        return gesture(path, durationMs) to "gesture"
+        return touchHold(cx, cy, durationMs) to "gesture"
     }
 
-    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {
-        val path = Path().apply { moveTo(c(x1), c(y1)); lineTo(c(x2), c(y2)) }
-        return gesture(path, durationMs)
-    }
+    suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean =
+        touchSwipe(x1, y1, x2, y2, durationMs)
 
     suspend fun pinch(cx: Float, cy: Float, zoomIn: Boolean, percent: Int): Boolean {
+        VScreenBridge.touchBackend?.let { return it.pinch(cx, cy, zoomIn, percent) }
         val span = (percent.coerceIn(1, 100) / 100f) * 400f
         val from = if (zoomIn) 60f else span
         val to = if (zoomIn) span else 60f
@@ -777,6 +833,13 @@ class A11yService : AccessibilityService() {
     suspend fun markedScreenshot(maxSide: Int = 1024): Pair<ByteArray, Screen>? {
         val screen = snapshot()
         val src = captureBitmap() ?: return null
+        return markBitmap(src, screen, maxSide) to screen
+    }
+
+    /** Scales [src] to [maxSide], draws ref marks for [screen]'s shown
+     *  elements and returns the JPEG. Works on any bitmap source — the
+     *  physical-display capture or the virtual-display host's PNG. */
+    fun markBitmap(src: Bitmap, screen: Screen, maxSide: Int = 1024): ByteArray {
         val scale = min(1f, maxSide.toFloat() / maxOf(src.width, src.height))
         val bmp = if (scale < 1f) {
             Bitmap.createScaledBitmap(
@@ -806,7 +869,7 @@ class A11yService : AccessibilityService() {
             out.compress(Bitmap.CompressFormat.JPEG, 60, it)
         }.toByteArray()
         out.recycle()
-        return jpeg to screen
+        return jpeg
     }
 
     companion object {
