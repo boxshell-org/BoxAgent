@@ -49,6 +49,10 @@ class Settings(private val context: Context) {
         val KEY_FLOAT_STOP = booleanPreferencesKey("float_stop")
         val KEY_LEARN_SKILLS = booleanPreferencesKey("learn_skills")
         val KEY_SEEDED_SKILLS = stringSetPreferencesKey("seeded_skills")
+        val KEY_VSCREEN = booleanPreferencesKey("vscreen")
+        val KEY_VSCREEN_W = intPreferencesKey("vscreen_w")
+        val KEY_VSCREEN_H = intPreferencesKey("vscreen_h")
+        val KEY_VSCREEN_DPI = intPreferencesKey("vscreen_dpi")
 
         /**
          * Built-in prompts older builds persisted as the "system prompt"
@@ -135,6 +139,12 @@ class Settings(private val context: Context) {
     val learnSkills: Flow<Boolean> = data.map { it[KEY_LEARN_SKILLS] ?: true }
     /** Built-in skill names seeded so far (deleted ones are not re-added). */
     val seededSkills: Flow<Set<String>> = data.map { it[KEY_SEEDED_SKILLS] ?: emptySet() }
+    /** Agent operates a virtual display instead of the physical screen. */
+    val vscreen: Flow<Boolean> = data.map { it[KEY_VSCREEN] ?: false }
+    /** Virtual display geometry; 0 = match the physical panel. */
+    val vscreenW: Flow<Int> = data.map { it[KEY_VSCREEN_W] ?: 0 }
+    val vscreenH: Flow<Int> = data.map { it[KEY_VSCREEN_H] ?: 0 }
+    val vscreenDpi: Flow<Int> = data.map { it[KEY_VSCREEN_DPI] ?: 0 }
 
     /** User-saved provider presets (name/baseUrl/model) as a JSON array. */
     val customProviders: Flow<List<LlmProfile>> = data.map { p ->
@@ -208,4 +218,10 @@ class Settings(private val context: Context) {
         context.prefs.edit { it[KEY_FLOAT_STOP] = v }
     suspend fun setLearnSkills(v: Boolean) = context.prefs.edit { it[KEY_LEARN_SKILLS] = v }
     suspend fun setSeededSkills(v: Set<String>) = context.prefs.edit { it[KEY_SEEDED_SKILLS] = v }
+    suspend fun setVscreen(v: Boolean) = context.prefs.edit { it[KEY_VSCREEN] = v }
+    suspend fun setVscreenSize(w: Int, h: Int, dpi: Int) = context.prefs.edit {
+        it[KEY_VSCREEN_W] = w
+        it[KEY_VSCREEN_H] = h
+        it[KEY_VSCREEN_DPI] = dpi
+    }
 }

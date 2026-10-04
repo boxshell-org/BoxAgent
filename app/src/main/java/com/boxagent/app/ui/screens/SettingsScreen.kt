@@ -403,6 +403,75 @@ fun SettingsScreen(app: BoxAgentApp) {
                         modifier = Modifier.clickable(onClick = openOverlayPerm),
                     )
                 }
+                val vsEnabled by s.vscreen.collectAsState(initial = false)
+                val vsStatus by app.vscreen.status.collectAsState()
+                ToggleRow(stringResource(R.string.vscreen), vsEnabled) { want ->
+                    scope.launch { app.vscreen.setEnabled(want) }
+                }
+                Text(
+                    stringResource(R.string.vscreen_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (vsEnabled) {
+                    var wStr by remember { mutableStateOf("") }
+                    var hStr by remember { mutableStateOf("") }
+                    var dpiStr by remember { mutableStateOf("") }
+                    androidx.compose.runtime.LaunchedEffect(Unit) {
+                        wStr = s.vscreenW.first().takeIf { it > 0 }?.toString() ?: ""
+                        hStr = s.vscreenH.first().takeIf { it > 0 }?.toString() ?: ""
+                        dpiStr = s.vscreenDpi.first().takeIf { it > 0 }?.toString() ?: ""
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SettingField(
+                            stringResource(R.string.vscreen_w), wStr, { wStr = it },
+                            Modifier.weight(1f),
+                        )
+                        SettingField(
+                            stringResource(R.string.vscreen_h), hStr, { hStr = it },
+                            Modifier.weight(1f),
+                        )
+                        SettingField(
+                            stringResource(R.string.vscreen_dpi), dpiStr, { dpiStr = it },
+                            Modifier.weight(1f),
+                        )
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PillButton(stringResource(R.string.vscreen_apply), filled = false, onClick = {
+                            scope.launch {
+                                s.setVscreenSize(
+                                    wStr.toIntOrNull() ?: 0,
+                                    hStr.toIntOrNull() ?: 0,
+                                    dpiStr.toIntOrNull() ?: 0,
+                                )
+                                // Recreate so the new geometry takes effect.
+                                app.vscreen.release()
+                                app.vscreen.ready()
+                            }
+                        })
+                        Text(
+                            stringResource(
+                                when (vsStatus.state) {
+                                    com.boxagent.app.vscreen.VState.OFF ->
+                                        R.string.vscreen_state_off
+                                    com.boxagent.app.vscreen.VState.STARTING ->
+                                        R.string.vscreen_state_starting
+                                    com.boxagent.app.vscreen.VState.READY ->
+                                        R.string.vscreen_state_ready
+                                    com.boxagent.app.vscreen.VState.ERROR ->
+                                        R.string.vscreen_state_error
+                                },
+                            ) + if (vsStatus.detail.isEmpty()) "" else " · " + vsStatus.detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (vsStatus.state == com.boxagent.app.vscreen.VState.ERROR)
+                                MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
 

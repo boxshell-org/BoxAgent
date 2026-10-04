@@ -195,6 +195,17 @@
         点按立即终止并返回本应用，可随意拖动。</string>
     <string name="float_stop_perm">需要"显示在其他应用上层"权限——点按前往授权。</string>
     <string name="float_stop_a11y">停止当前任务并返回 BoxAgent</string>
+    <string name="vscreen">虚拟屏幕</string>
+    <string name="vscreen_desc">让 Agent 在一块独立的虚拟屏幕上操作——\
+        不触碰你的真实屏幕。需要 Shell 守护进程。</string>
+    <string name="vscreen_w">宽（像素）</string>
+    <string name="vscreen_h">高（像素）</string>
+    <string name="vscreen_dpi">密度（dpi）</string>
+    <string name="vscreen_apply">应用</string>
+    <string name="vscreen_state_off">已关闭</string>
+    <string name="vscreen_state_starting">启动中…</string>
+    <string name="vscreen_state_ready">就绪</string>
+    <string name="vscreen_state_error">出错</string>
     <string name="auto_title">正在获取 Shell 权限…</string>
     <string name="auto_step_reconnect">检查已存在的守护进程…</string>
     <string name="auto_step_try">正在尝试 %1$s…</string>

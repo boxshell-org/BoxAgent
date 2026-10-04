@@ -33,11 +33,16 @@ class Secrets(context: Context) {
         get() = prefs.getString(K_DAEMON_TOKEN, "") ?: ""
         set(v) = prefs.edit().putString(K_DAEMON_TOKEN, v).apply()
 
+    var vscreenToken: String
+        get() = prefs.getString(K_VSCREEN_TOKEN, "") ?: ""
+        set(v) = prefs.edit().putString(K_VSCREEN_TOKEN, v).apply()
+
     fun clear() = prefs.edit().clear().apply()
 
     private companion object {
         const val K_API_KEY = "llm_api_key"
         const val K_ADB_PEM = "adb_key_pem"
         const val K_DAEMON_TOKEN = "daemon_token"
+        const val K_VSCREEN_TOKEN = "vscreen_token"
     }
 }

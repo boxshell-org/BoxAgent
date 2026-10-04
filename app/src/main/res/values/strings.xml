@@ -200,6 +200,17 @@
     <string name="float_stop_perm">Needs “Display over other apps” permission \
         — tap to grant.</string>
     <string name="float_stop_a11y">Stop the running task and return to BoxAgent</string>
+    <string name="vscreen">Virtual screen</string>
+    <string name="vscreen_desc">Run the agent on a private virtual display — \
+        your real screen stays untouched. Requires the shell daemon.</string>
+    <string name="vscreen_w">Width (px)</string>
+    <string name="vscreen_h">Height (px)</string>
+    <string name="vscreen_dpi">Density (dpi)</string>
+    <string name="vscreen_apply">Apply</string>
+    <string name="vscreen_state_off">off</string>
+    <string name="vscreen_state_starting">starting…</string>
+    <string name="vscreen_state_ready">ready</string>
+    <string name="vscreen_state_error">error</string>
     <string name="auto_title">Finding shell access…</string>
     <string name="auto_step_reconnect">Checking for a live daemon…</string>
     <string name="auto_step_try">Trying %1$s…</string>
