@@ -460,7 +460,12 @@ class AgentController(
                     } else e.optString("text")
                     flushAssistant()
                     val steps = toolRunner.traceSnapshot()
-                    val recap = if (skillTitle == null) RunRecap(runPrompt, text, steps) else null
+                    // Only offer "Save as skill" when something replayable
+                    // actually ran — a plain chat turn produces an empty
+                    // trace and the card would be noise.
+                    val recap =
+                        if (skillTitle == null && steps.isNotEmpty()) RunRecap(runPrompt, text, steps)
+                        else null
                     _state.update {
                         // task_done's summary was never streamed — show it.
                         val lastAssistant = it.messages.lastOrNull { m -> m.role == "assistant" }
