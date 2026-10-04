@@ -23,6 +23,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -99,6 +101,18 @@ class AgentController(
      *  late `error`/`done` can't kill a newer run's state. */
     @Volatile private var activeCallbacks: Callbacks? = null
     @Volatile private var runPrompt = ""
+
+    private val floatStop = FloatStop(context).apply { onStop = { cancel() } }
+
+    init {
+        // The stop bubble floats over whatever app the agent is driving;
+        // window ops must happen on the main thread.
+        scope.launch(Dispatchers.Main) {
+            combine(_state, settings.floatStop) { s, on -> s.running && on }
+                .distinctUntilChanged()
+                .collect { want -> if (want) floatStop.show() else floatStop.hide() }
+        }
+    }
 
     private fun nextId() = msgCounter.incrementAndGet()
 

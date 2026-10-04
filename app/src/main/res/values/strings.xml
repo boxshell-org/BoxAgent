@@ -194,6 +194,12 @@
     <string name="daemon_watchdog">Daemon watchdog</string>
     <string name="watchdog_desc">Restarts the shell daemon if the connection drops; \
         runs a 15-minute health check while the app is backgrounded.</string>
+    <string name="float_stop">Floating stop button</string>
+    <string name="float_stop_desc">While a task runs, a small bubble floats over \
+        other apps — tap it to force-stop and return here. Drag it anywhere.</string>
+    <string name="float_stop_perm">Needs “Display over other apps” permission \
+        — tap to grant.</string>
+    <string name="float_stop_a11y">Stop the running task and return to BoxAgent</string>
     <string name="appearance">Appearance</string>
     <string name="theme_system">System</string>
     <string name="theme_light">Light</string>

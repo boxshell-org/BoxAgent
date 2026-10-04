@@ -190,6 +190,11 @@
     <string name="daemon_watchdog">守护进程看门狗</string>
     <string name="watchdog_desc">连接断开后重启 shell 守护进程；\
         应用退到后台时每 15 分钟做一次健康检查。</string>
+    <string name="float_stop">悬浮停止按钮</string>
+    <string name="float_stop_desc">任务运行期间在其他应用上方显示一个小圆球——\
+        点按立即终止并返回本应用，可随意拖动。</string>
+    <string name="float_stop_perm">需要"显示在其他应用上层"权限——点按前往授权。</string>
+    <string name="float_stop_a11y">停止当前任务并返回 BoxAgent</string>
     <string name="appearance">外观</string>
     <string name="theme_system">跟随系统</string>
     <string name="theme_light">浅色</string>

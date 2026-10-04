@@ -17,6 +17,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,7 +30,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings as OsSettings
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.boxagent.app.BoxAgentApp
 import com.boxagent.app.R
 import com.boxagent.app.bridge.Core
@@ -352,6 +359,50 @@ fun SettingsScreen(app: BoxAgentApp) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                val ctx = LocalContext.current
+                val floatStop by s.floatStop.collectAsState(initial = true)
+                var overlayOk by remember {
+                    mutableStateOf(OsSettings.canDrawOverlays(ctx))
+                }
+                // Grant happens in system settings — refresh on return.
+                val owner = LocalLifecycleOwner.current
+                DisposableEffect(owner) {
+                    val obs = LifecycleEventObserver { _, e ->
+                        if (e == Lifecycle.Event.ON_RESUME) {
+                            overlayOk = OsSettings.canDrawOverlays(ctx)
+                        }
+                    }
+                    owner.lifecycle.addObserver(obs)
+                    onDispose { owner.lifecycle.removeObserver(obs) }
+                }
+                val openOverlayPerm = {
+                    runCatching {
+                        ctx.startActivity(
+                            Intent(
+                                OsSettings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:" + ctx.packageName),
+                            ),
+                        )
+                    }
+                    Unit
+                }
+                ToggleRow(stringResource(R.string.float_stop), floatStop) { want ->
+                    scope.launch { s.setFloatStop(want) }
+                    if (want && !overlayOk) openOverlayPerm()
+                }
+                Text(
+                    stringResource(R.string.float_stop_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (floatStop && !overlayOk) {
+                    Text(
+                        stringResource(R.string.float_stop_perm),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.clickable(onClick = openOverlayPerm),
+                    )
+                }
             }
         }
 

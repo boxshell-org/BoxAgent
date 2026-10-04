@@ -46,6 +46,7 @@ class Settings(private val context: Context) {
         val KEY_COMPACT_TOOLS = booleanPreferencesKey("compact_tools")
 
         val KEY_VISION = booleanPreferencesKey("vision")
+        val KEY_FLOAT_STOP = booleanPreferencesKey("float_stop")
         val KEY_LEARN_SKILLS = booleanPreferencesKey("learn_skills")
         val KEY_SEEDED_SKILLS = stringSetPreferencesKey("seeded_skills")
 
@@ -128,6 +129,8 @@ class Settings(private val context: Context) {
         data.map { it[KEY_COMPACT_TOOLS] ?: true }
     /** Send marked screenshots to the model (vision-capable models only). */
     val vision: Flow<Boolean> = data.map { it[KEY_VISION] ?: false }
+    /** Floating stop bubble over other apps while a run is live. */
+    val floatStop: Flow<Boolean> = data.map { it[KEY_FLOAT_STOP] ?: true }
     /** Let the agent propose skills (saved as drafts for review). */
     val learnSkills: Flow<Boolean> = data.map { it[KEY_LEARN_SKILLS] ?: true }
     /** Built-in skill names seeded so far (deleted ones are not re-added). */
@@ -201,6 +204,8 @@ class Settings(private val context: Context) {
     suspend fun setCompactTools(v: Boolean) =
         context.prefs.edit { it[KEY_COMPACT_TOOLS] = v }
     suspend fun setVision(v: Boolean) = context.prefs.edit { it[KEY_VISION] = v }
+    suspend fun setFloatStop(v: Boolean) =
+        context.prefs.edit { it[KEY_FLOAT_STOP] = v }
     suspend fun setLearnSkills(v: Boolean) = context.prefs.edit { it[KEY_LEARN_SKILLS] = v }
     suspend fun setSeededSkills(v: Set<String>) = context.prefs.edit { it[KEY_SEEDED_SKILLS] = v }
 }
