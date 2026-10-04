@@ -557,6 +557,28 @@ private fun matchScore(q: String, vararg fields: String): Int {
     return best
 }
 
+/**
+ * Rank providers for a query: exact/prefix/substring hits on id, name or api
+ * host first, then providers merely carrying a matching model id.
+ */
+internal fun providerFilter(
+    providers: List<CatalogProvider>,
+    query: String,
+): List<CatalogProvider> {
+    val f = query.trim().lowercase()
+    if (f.isEmpty()) return providers
+    return providers.mapNotNull { p ->
+        val s = matchScore(f, p.id, p.name, hostOf(p.api))
+        val rank = when {
+            s != Int.MAX_VALUE -> s
+            p.models.any { it.id.lowercase().contains(f) } -> 3
+            else -> return@mapNotNull null
+        }
+        p to rank
+    }.sortedWith(compareBy({ it.second }, { it.first.name.lowercase() }))
+        .map { it.first }
+}
+
 @Composable
 private fun ModelPickerDialog(
     models: List<String>,
@@ -575,58 +597,66 @@ private fun ModelPickerDialog(
                 style = MaterialTheme.typography.titleMedium)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SettingField(stringResource(R.string.search), q, { q = it })
+            // Same IME fix as ProviderDialog: the search field scrolls with
+            // the list so the top hit is never hidden under the field.
+            val list = remember(models, info, q) {
+                val f = q.trim().lowercase()
+                if (f.isEmpty()) models
+                else models.mapNotNull { id ->
+                    val s = matchScore(f, id, info[id]?.name.orEmpty())
+                    if (s == Int.MAX_VALUE) null else id to s
+                }.sortedWith(compareBy({ it.second }, { it.first }))
+                    .map { it.first }
+            }
+            LazyColumn(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 440.dp),
+            ) {
+                item(key = "search") {
+                    SettingField(stringResource(R.string.search), q, { q = it })
+                }
                 when {
-                    loading && models.isEmpty() -> Text(
-                        "…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    models.isEmpty() && error != null -> {
+                    loading && models.isEmpty() -> item {
                         Text(
-                            stringResource(R.string.models_error) + ": " + error,
+                            "…",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        PillButton(stringResource(R.string.retry),
-                            filled = false, onClick = onRetry)
+                    }
+                    models.isEmpty() && error != null -> {
+                        item {
+                            Text(
+                                stringResource(R.string.models_error) + ": " + error,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        item {
+                            PillButton(stringResource(R.string.retry),
+                                filled = false, onClick = onRetry)
+                        }
                     }
                     else -> {
-                        val list = remember(models, info, q) {
-                            val f = q.trim().lowercase()
-                            if (f.isEmpty()) models
-                            else models.mapNotNull { id ->
-                                val s = matchScore(f, id, info[id]?.name.orEmpty())
-                                if (s == Int.MAX_VALUE) null else id to s
-                            }.sortedWith(compareBy({ it.second }, { it.first }))
-                                .map { it.first }
-                        }
-                        LazyColumn(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 380.dp),
-                        ) {
-                            if (list.isEmpty()) {
-                                item {
-                                    Text(stringResource(R.string.models_empty),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                        if (list.isEmpty()) {
+                            item {
+                                Text(stringResource(R.string.models_empty),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            items(list) { id ->
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onPick(id) }
-                                        .padding(vertical = 8.dp),
-                                ) {
-                                    Text(id, style = MaterialTheme.typography.titleMedium)
-                                    info[id]?.let {
-                                        Text(modelMeta(it),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
+                        }
+                        items(list) { id ->
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onPick(id) }
+                                    .padding(vertical = 8.dp),
+                            ) {
+                                Text(id, style = MaterialTheme.typography.titleMedium)
+                                info[id]?.let {
+                                    Text(modelMeta(it),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                         }
@@ -656,72 +686,68 @@ private fun ProviderDialog(
                 style = MaterialTheme.typography.titleMedium)
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SettingField(stringResource(R.string.search), q, { q = it })
+            // The field lives inside the LazyColumn so the IME resize keeps it
+            // visible without clipping the top-ranked result (an AlertDialog
+            // scrolls its whole `text` block to bring a focused field into
+            // view, which used to hide item 0 under the field).
+            val list = remember(providers, q) {
+                providers?.let { providerFilter(it, q) } ?: emptyList()
+            }
+            LazyColumn(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 440.dp),
+            ) {
+                item(key = "search") {
+                    SettingField(stringResource(R.string.search), q, { q = it })
+                }
                 when {
                     providers != null -> {
-                        val list = remember(providers, q) {
-                            val f = q.trim().lowercase()
-                            if (f.isEmpty()) providers
-                            else providers.mapNotNull { p ->
-                                val s = matchScore(f, p.id, p.name, hostOf(p.api))
-                                val rank = when {
-                                    s != Int.MAX_VALUE -> s
-                                    // Searching a model id (e.g. "gpt-4o")
-                                    // surfaces the provider carrying it.
-                                    p.models.any { it.id.lowercase().contains(f) } -> 3
-                                    else -> return@mapNotNull null
-                                }
-                                p to rank
-                            }.sortedWith(compareBy({ it.second },
-                                { it.first.name.lowercase() }))
-                                .map { it.first }
-                        }
-                        LazyColumn(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 380.dp),
-                        ) {
-                            if (list.isEmpty()) {
-                                item {
-                                    Text(stringResource(R.string.models_empty),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
+                        if (list.isEmpty()) {
+                            item {
+                                Text(stringResource(R.string.models_empty),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            items(list, key = { it.id }) { p ->
-                                Column(
-                                    Modifier
-                                        .fillMaxWidth()
-                                        .clickable { onPick(p) }
-                                        .padding(vertical = 8.dp),
-                                ) {
-                                    Text(p.name,
-                                        style = MaterialTheme.typography.titleMedium)
-                                    Text(
-                                        stringResource(R.string.models_count, p.models.size) +
-                                            " · " + hostOf(p.api),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
+                        }
+                        items(list, key = { it.id }) { p ->
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onPick(p) }
+                                    .padding(vertical = 8.dp),
+                            ) {
+                                Text(p.name,
+                                    style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    stringResource(R.string.models_count, p.models.size) +
+                                        " · " + hostOf(p.api),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                     }
                     error != null -> {
+                        item {
+                            Text(
+                                stringResource(R.string.models_error) + ": " + error,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        item {
+                            PillButton(stringResource(R.string.retry),
+                                filled = false, onClick = onRetry)
+                        }
+                    }
+                    else -> item {
                         Text(
-                            stringResource(R.string.models_error) + ": " + error,
+                            "…",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        PillButton(stringResource(R.string.retry),
-                            filled = false, onClick = onRetry)
                     }
-                    else -> Text(
-                        "…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
             }
         },

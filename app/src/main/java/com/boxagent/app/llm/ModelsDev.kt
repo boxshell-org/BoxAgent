@@ -120,7 +120,7 @@ object ModelsDev {
         return if (f.isFile) runCatching { f.readText() }.getOrNull() else null
     }
 
-    private fun parse(raw: String): List<CatalogProvider> {
+    internal fun parse(raw: String): List<CatalogProvider> {
         val root = JSONObject(raw)
         val out = mutableListOf<CatalogProvider>()
         val keys = root.keys()
