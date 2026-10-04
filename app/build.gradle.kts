@@ -96,6 +96,9 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir("src/main/jniLibs")
+            // :vscreen:dexJar emits build/assets/vscreen.jar — the shell-side
+            // virtual-display host pushed to the device at runtime.
+            assets.srcDir("$rootDir/vscreen/build/assets")
         }
     }
 
@@ -162,3 +165,7 @@ dependencies {
     // Real org.json for JVM tests (android.jar only has stubs).
     testImplementation("org.json:json:20240303")
 }
+
+// The virtual-display host must be dexed before assets are packaged.
+tasks.matching { it.name == "mergeDebugAssets" || it.name == "mergeReleaseAssets" }
+    .configureEach { dependsOn(":vscreen:dexJar") }

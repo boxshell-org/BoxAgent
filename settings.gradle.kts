@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "BoxAgent"
 include(":app")
+include(":vscreen")
