@@ -154,7 +154,7 @@
 
     <string name="perm_adb">Wireless debugging</string>
     <string name="perm_adb_desc">Gives BoxAgent an ADB shell (uid 2000) for system-level operations like installs, settings and package control.</string>
-    <string name="perm_adb_steps">1. Settings → About phone → tap Build number 7 times to unlock Developer options.\n2. Settings → System → Developer options → turn on Wireless debugging.\n3. Tap “Pair device with pairing code” — note the IP, port and 6-digit code.\n4. Come back and tap Pair, then Connect &amp; spawn.</string>
+    <string name="perm_adb_steps">1. Settings → About phone → tap Build number 7 times to unlock Developer options.\n2. Settings → System → Developer options → turn on Wireless debugging.\n3. Come back and tap Connect — BoxAgent finds the endpoint by itself.\n4. First time only: when asked, tap “Pair device with pairing code” and enter the 6-digit code. After that it connects on its own.</string>
 
     <string name="perm_a11y">Accessibility service</string>
     <string name="perm_a11y_desc">Reads the screen and performs taps, typing, swipes and scrolls on your behalf.</string>
@@ -200,6 +200,13 @@
     <string name="float_stop_perm">Needs “Display over other apps” permission \
         — tap to grant.</string>
     <string name="float_stop_a11y">Stop the running task and return to BoxAgent</string>
+    <string name="auto_title">Finding shell access…</string>
+    <string name="auto_step_reconnect">Checking for a live daemon…</string>
+    <string name="auto_step_try">Trying %1$s…</string>
+    <string name="auto_step_scan">Scanning for wireless debugging…</string>
+    <string name="auto_none">Couldn\'t find a device automatically — enter it manually.</string>
+    <string name="open_wireless_debugging">Wireless debugging</string>
+    <string name="pair_needed">Pair first — wireless debugging is on but this device isn\'t paired yet.</string>
     <string name="appearance">Appearance</string>
     <string name="theme_system">System</string>
     <string name="theme_light">Light</string>
@@ -213,11 +220,13 @@
     <!-- onboarding -->
     <string name="onboard_tagline">Three steps to give it hands.</string>
     <string name="step1_title">Pair with wireless debugging</string>
-    <string name="step1_body">Settings → Developer Options → Wireless Debugging → \
-        “Pair with pairing code”. Enter the port and code shown there.</string>
+    <string name="step1_body">Turn on Wireless Debugging in Developer options. The \
+        pairing address is found automatically — just enter the 6-digit code \
+        from “Pair device with pairing code”.</string>
     <string name="step2_title">Spawn the daemon</string>
-    <string name="step2_body">Now enter the connect port — the one on the main \
-        Wireless Debugging screen (different from the pairing port).</string>
+    <string name="step2_body">BoxAgent finds the connect endpoint and starts its \
+        shell daemon by itself — the fields below are only for when discovery \
+        comes up empty.</string>
     <string name="step3_title">Accessibility &amp; battery</string>
     <string name="step3_body">Enable BoxAgent in Accessibility Settings so it can \
         read screens and tap. Exclude it from battery optimisation so the agent \

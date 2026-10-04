@@ -12,9 +12,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -31,6 +33,22 @@ data class DaemonStatus(
     val daemonVersion: String = "",
 )
 
+/** Reports ladder rungs to the UI — keys are string resources, [arg] is
+ *  an endpoint like "192.168.1.5:39001". */
+fun interface AutoStepSink {
+    fun onStep(key: String, arg: String)
+}
+
+/** How [DaemonManager.autoConnect] ended. */
+sealed interface AutoOutcome {
+    data object Online : AutoOutcome
+    /** Wireless debugging is up but unpaired — the only step that needs
+     *  a human (the 6-digit code from the system pairing dialog). */
+    data class NeedsPair(val host: String, val port: Int) : AutoOutcome
+    /** Nothing discoverable — fall back to manual host/port entry. */
+    data object Manual : AutoOutcome
+}
+
 /**
  * Owns the privileged-daemon lifecycle: pairing (via adb-tls), daemon push
  * and spawn (via adb_client ops), socket reconnect + watchdog.
@@ -42,7 +60,11 @@ class DaemonManager(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lock = Mutex()
+    /** Serializes [autoConnect]/[connectAfterPair] — a second ladder waits
+     *  for the first instead of probing the same endpoints concurrently. */
+    private val autoMu = Mutex()
     private val rand = SecureRandom()
+    private val nsd = NsdHelper(context)
 
     private val _status = MutableStateFlow(DaemonStatus())
     val status: StateFlow<DaemonStatus> = _status
@@ -211,6 +233,76 @@ class DaemonManager(
         throw IllegalStateException("no shell daemon — pair and connect first")
     }
 
+    /**
+     * Get shell access with as little user input as possible, cheapest
+     * first:
+     *   1. a live or previously spawned daemon,
+     *   2. the endpoint that worked last time,
+     *   3. plain adb on 127.0.0.1:5555 (emulator, `adb tcpip`, rooted),
+     *   4. wireless debugging's mDNS connect endpoint (already paired),
+     *   5. its pairing endpoint — returned for the user to finish,
+     *   6. manual entry.
+     * Does NOT take [lock] — each probe holds it via [connectAndSpawn].
+     */
+    suspend fun autoConnect(
+        step: AutoStepSink = AutoStepSink { _, _ -> },
+    ): AutoOutcome = autoMu.withLock {
+        step.onStep("reconnect", "")
+        reconnect()?.let { return@withLock AutoOutcome.Online }
+
+        val host = settings.adbHost.first()
+        val port = settings.adbPort.first()
+        if (port > 0 && probe(host, port, step)) return@withLock AutoOutcome.Online
+
+        if (host != "127.0.0.1" || port != 5555) {
+            if (probe("127.0.0.1", 5555, step)) return@withLock AutoOutcome.Online
+        }
+
+        step.onStep("scan", "")
+        findEndpoint(NsdHelper.TYPE_CONNECT, MDNS_SCAN_MS)?.let {
+            if (probe(it.host, it.port, step)) return@withLock AutoOutcome.Online
+        }
+        findEndpoint(NsdHelper.TYPE_PAIRING, MDNS_PAIR_MS)?.let {
+            return@withLock AutoOutcome.NeedsPair(it.host, it.port)
+        }
+        AutoOutcome.Manual
+    }
+
+    /**
+     * Pairing just succeeded — the pairing service flips to a connect
+     * endpoint shortly after. Poll mDNS, then spawn. No stored endpoint
+     * is touched: the pairing port is not the connect port.
+     */
+    suspend fun connectAfterPair(step: AutoStepSink): AutoOutcome = autoMu.withLock {
+        repeat(3) {
+            step.onStep("scan", "")
+            findEndpoint(NsdHelper.TYPE_CONNECT, MDNS_SCAN_MS)?.let {
+                if (probe(it.host, it.port, step)) return@withLock AutoOutcome.Online
+            }
+            delay(800)
+        }
+        AutoOutcome.Manual
+    }
+
+    /** First _adb-tls-* service that resolves, or null on timeout/failure. */
+    suspend fun findEndpoint(type: String, timeoutMs: Long): AdbEndpoint? =
+        runCatching {
+            withTimeoutOrNull(timeoutMs) {
+                nsd.discover(type).first {
+                    it.port > 0 || it.serviceName.startsWith("discovery_failed")
+                }
+            }?.takeIf { it.port > 0 }
+        }.getOrNull()
+
+    /** One spawn attempt. The JNI op is hard-deadlined in Rust so it
+     *  always returns and releases [lock]; the Kotlin-side timeout is a
+     *  backstop set well above the native deadline. */
+    private suspend fun probe(host: String, port: Int, step: AutoStepSink): Boolean {
+        step.onStep("try", "$host:$port")
+        val r = withTimeoutOrNull(PROBE_TIMEOUT_MS) { connectAndSpawn(host, port) }
+        return r?.isSuccess == true
+    }
+
     private fun startWatchdog() {
         if (watchdogJob?.isActive == true) return
         watchdogJob = scope.launch {
@@ -265,5 +357,9 @@ class DaemonManager(
     companion object {
         const val REMOTE_PATH = "/data/local/tmp/boxagentd"
         const val LOG_PATH = "/data/local/tmp/boxagentd.log"
+        /** Above the Rust op deadline (25s) — a backstop, not the bound. */
+        private const val PROBE_TIMEOUT_MS = 35_000L
+        private const val MDNS_SCAN_MS = 2_500L
+        private const val MDNS_PAIR_MS = 1_500L
     }
 }

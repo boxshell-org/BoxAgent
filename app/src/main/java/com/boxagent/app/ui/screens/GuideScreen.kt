@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.boxagent.app.BoxAgentApp
 import com.boxagent.app.R
+import com.boxagent.app.daemon.AutoOutcome
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.BwCard
@@ -72,6 +73,41 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
     var battOn by remember { mutableStateOf(batteryExempt(ctx)) }
     var showPair by remember { mutableStateOf(false) }
     var showConnect by remember { mutableStateOf(false) }
+    var autoStep by remember { mutableStateOf<String?>(null) }
+    var autoJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var pairHost by remember { mutableStateOf("127.0.0.1") }
+    var pairPort by remember { mutableStateOf("") }
+    var connectHint by remember { mutableStateOf<String?>(null) }
+
+    /** Same ladder as the Status tab — auto first, humans only for the
+     *  pairing code or when discovery comes up empty. */
+    fun runLadder(afterPair: Boolean) {
+        autoStep = ctx.getString(R.string.auto_step_reconnect)
+        autoJob = scope.launch {
+            val sink = com.boxagent.app.daemon.AutoStepSink { k, arg ->
+                autoStep = when (k) {
+                    "try" -> ctx.getString(R.string.auto_step_try, arg)
+                    "scan" -> ctx.getString(R.string.auto_step_scan)
+                    else -> ctx.getString(R.string.auto_step_reconnect)
+                }
+            }
+            val out = if (afterPair) app.daemon.connectAfterPair(sink)
+            else app.daemon.autoConnect(sink)
+            autoStep = null
+            when (out) {
+                AutoOutcome.Online -> {}
+                is AutoOutcome.NeedsPair -> {
+                    pairHost = out.host
+                    pairPort = out.port.toString()
+                    showPair = true
+                }
+                AutoOutcome.Manual -> {
+                    connectHint = ctx.getString(R.string.auto_none)
+                    showConnect = true
+                }
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -134,14 +170,24 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
             desc = stringResource(R.string.perm_adb_desc),
             steps = stringResource(R.string.perm_adb_steps),
         ) {
+            PillButton(stringResource(R.string.connect), onClick = {
+                if (autoJob?.isActive != true) runLadder(afterPair = false)
+            })
+            autoStep?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            PillButton(stringResource(R.string.pair), filled = false, onClick = {
+                showPair = true
+            })
             PillButton(stringResource(R.string.open_dev_settings), filled = false, onClick = {
                 ctx.startActivity(
                     Intent(AndroidSettings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
-            })
-            PillButton(stringResource(R.string.pair), filled = false, onClick = {
-                showPair = true
             })
         }
 
@@ -189,11 +235,13 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
 
     if (showPair) {
         PairDialog(
+            initialHost = pairHost,
+            initialPort = pairPort,
             onPair = { host, port, code ->
                 scope.launch {
-                    app.daemon.pair(host, port.toIntOrNull() ?: 0, code)
+                    val r = app.daemon.pair(host, port.toIntOrNull() ?: 0, code)
                     showPair = false
-                    showConnect = true
+                    if (r.isSuccess) runLadder(afterPair = true) else showConnect = true
                 }
             },
             onDismiss = { showPair = false },
@@ -201,6 +249,7 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
     }
     if (showConnect) {
         ConnectDialog(
+            hint = connectHint,
             onConnect = { host, port ->
                 scope.launch {
                     app.daemon.connectAndSpawn(host, port.toIntOrNull() ?: 0)

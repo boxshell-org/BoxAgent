@@ -31,6 +31,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
 import com.boxagent.app.R
+import com.boxagent.app.daemon.AutoOutcome
+import com.boxagent.app.daemon.NsdHelper
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.PillButton
@@ -60,6 +62,25 @@ fun OnboardingScreen(app: BoxAgentApp) {
     var busy by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
     var pairedOk by remember { mutableStateOf(false) }
+
+    // mDNS answers most of the form: the pairing endpoint is announced
+    // by wireless debugging while its dialog is open — prefill host/port
+    // so the 6-digit code is the only thing left to type.
+    LaunchedEffect(Unit) {
+        app.daemon.findEndpoint(NsdHelper.TYPE_PAIRING, 3_500)?.let {
+            if (pairPort.isEmpty()) {
+                host = it.host
+                pairPort = it.port.toString()
+            }
+        }
+        // The connect endpoint is already up on devices paired before.
+        app.daemon.findEndpoint(NsdHelper.TYPE_CONNECT, 1_500)?.let {
+            if (connectPort.isEmpty()) {
+                host = it.host
+                connectPort = it.port.toString()
+            }
+        }
+    }
 
     Column(
         Modifier
@@ -222,6 +243,44 @@ fun OnboardingScreen(app: BoxAgentApp) {
             delay(600); pager.animateScrollToPage(1)
         } else if (pager.currentPage == 1 && st.shell == ShellState.ONLINE) {
             delay(600); pager.animateScrollToPage(2)
+        }
+    }
+
+    // Arriving at the spawn step: climb the ladder — a freshly paired
+    // device flips to a connect endpoint, a previously paired one is
+    // already advertising it. Manual fields stay for when nothing is
+    // discoverable.
+    LaunchedEffect(pager.currentPage) {
+        if (pager.currentPage == 1 && st.shell != ShellState.ONLINE && !busy) {
+            busy = true
+            val sink = com.boxagent.app.daemon.AutoStepSink { k, arg ->
+                note = when (k) {
+                    "try" -> ctx.getString(R.string.auto_step_try, arg)
+                    "scan" -> ctx.getString(R.string.auto_step_scan)
+                    else -> ctx.getString(R.string.auto_step_reconnect)
+                }
+            }
+            val out = if (pairedOk) app.daemon.connectAfterPair(sink)
+            else app.daemon.autoConnect(sink)
+            when (out) {
+                is AutoOutcome.NeedsPair -> {
+                    host = out.host
+                    pairPort = out.port.toString()
+                    note = ctx.getString(R.string.pair_needed)
+                    pager.animateScrollToPage(0)
+                }
+                AutoOutcome.Manual -> {
+                    note = ctx.getString(R.string.auto_none)
+                    app.daemon.findEndpoint(NsdHelper.TYPE_CONNECT, 1_500)?.let {
+                        if (connectPort.isEmpty()) {
+                            host = it.host
+                            connectPort = it.port.toString()
+                        }
+                    }
+                }
+                AutoOutcome.Online -> {}
+            }
+            busy = false
         }
     }
 }

@@ -62,10 +62,13 @@ class BoxAgentApp : Application() {
         appScope.launch {
             runCatching { skills.seedBuiltins(java.util.Locale.getDefault().language) }
         }
-        // Reconnect to a live daemon; start the FGS when shell is online so
-        // the watchdog survives backgrounding.
+        // Reconnect to a live daemon; when there isn't one, climb the
+        // auto-connect ladder (stored endpoint → localhost adb → mDNS).
+        // Only pairing ever needs a human — everything before it is
+        // silent. Then start the FGS when shell is online so the watchdog
+        // survives backgrounding.
         appScope.launch {
-            daemon.reconnect()
+            if (daemon.reconnect() == null) daemon.autoConnect()
             daemon.status.collect { st ->
                 if (st.shell == ShellState.ONLINE && settings.keepWatchdog.first()) {
                     AgentService.start(

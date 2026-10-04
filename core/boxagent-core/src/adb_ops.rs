@@ -4,10 +4,38 @@
 
 use adb_client::{tcp::ADBTcpDevice, ADBDeviceExt};
 use std::io::{Cursor, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use thiserror::Error;
+
+/// `adb_client`'s transport reads with an effectively unbounded timeout —
+/// a live non-adb port (or a middlebox that accepts then drops) hangs the
+/// JNI call and the Kotlin mutex serializing daemon ops with it. Every op
+/// runs on a worker with a hard deadline; on timeout the worker is left
+/// detached holding a dead socket while the caller fails fast.
+const SPAWN_DEADLINE: Duration = Duration::from_secs(25);
+const SHELL_DEADLINE: Duration = Duration::from_secs(12);
+/// `TcpStream::connect` inside `adb_client` is unbounded too (kernel SYN
+/// retries ~2min for a filtered host) — probe reachability ourselves so a
+/// dead endpoint fails in milliseconds and a blackholed one in seconds.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn run_deadlined<T, F>(deadline: Duration, what: &'static str, f: F) -> Result<T, AdbOpsError>
+where
+    F: FnOnce() -> Result<T, AdbOpsError> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(deadline)
+        .unwrap_or_else(|_| Err(AdbOpsError::Adb(format!("{what} timed out"))))
+}
 
 #[derive(Debug, Error)]
 pub enum AdbOpsError {
@@ -53,6 +81,7 @@ impl Drop for KeyFile {
 }
 
 fn device(pem: &str, addr: SocketAddr) -> Result<(ADBTcpDevice, KeyFile), AdbOpsError> {
+    TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
     let key = KeyFile::new(pem)?;
     let dev = ADBTcpDevice::new_with_custom_private_key(addr, &key.0)
         .map_err(|e| AdbOpsError::Adb(format!("{e}")))?;
@@ -67,6 +96,24 @@ fn sq(s: &str) -> String {
 /// Push `daemon` bytes to the device and spawn it detached.
 /// Returns the shell output of the spawn command for diagnostics.
 pub fn spawn_daemon(
+    pem: &str,
+    addr: SocketAddr,
+    daemon_bytes: &[u8],
+    remote_path: &str,
+    socket_name: &str,
+    token: &str,
+) -> Result<String, AdbOpsError> {
+    let pem = pem.to_owned();
+    let bytes = daemon_bytes.to_vec();
+    let remote_path = remote_path.to_owned();
+    let socket_name = socket_name.to_owned();
+    let token = token.to_owned();
+    run_deadlined(SPAWN_DEADLINE, "spawn daemon", move || {
+        spawn_daemon_inner(&pem, addr, &bytes, &remote_path, &socket_name, &token)
+    })
+}
+
+fn spawn_daemon_inner(
     pem: &str,
     addr: SocketAddr,
     daemon_bytes: &[u8],
@@ -110,6 +157,14 @@ pub fn spawn_daemon(
 
 /// One-off diagnostic shell command over the ADB session.
 pub fn adb_shell(pem: &str, addr: SocketAddr, cmd: &str) -> Result<String, AdbOpsError> {
+    let pem = pem.to_owned();
+    let cmd = cmd.to_owned();
+    run_deadlined(SHELL_DEADLINE, "adb shell", move || {
+        adb_shell_inner(&pem, addr, &cmd)
+    })
+}
+
+fn adb_shell_inner(pem: &str, addr: SocketAddr, cmd: &str) -> Result<String, AdbOpsError> {
     let (mut dev, _key) = device(pem, addr)?;
     let mut out = Vec::new();
     let mut err = Vec::new();

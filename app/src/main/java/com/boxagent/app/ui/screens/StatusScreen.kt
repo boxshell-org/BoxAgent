@@ -49,6 +49,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
 import com.boxagent.app.R
+import com.boxagent.app.daemon.AutoOutcome
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.BwCard
@@ -57,6 +58,7 @@ import com.boxagent.app.ui.components.PillButton
 import com.boxagent.app.ui.components.SectionLabel
 import com.boxagent.app.ui.components.StatusPill
 import com.boxagent.app.ui.components.bwTextFieldColors
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 @Composable
@@ -66,9 +68,47 @@ fun StatusScreen(app: BoxAgentApp) {
     val ctx = LocalContext.current
     var showPair by remember { mutableStateOf(false) }
     var showConnect by remember { mutableStateOf(false) }
+    var showAuto by remember { mutableStateOf(false) }
+    var autoStep by remember { mutableStateOf("") }
+    var autoJob by remember { mutableStateOf<Job?>(null) }
+    var pairHost by remember { mutableStateOf("127.0.0.1") }
+    var pairPort by remember { mutableStateOf("") }
+    var connectHint by remember { mutableStateOf<String?>(null) }
     var showGuide by remember { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
     var probe by remember { mutableStateOf<String?>(null) }
+
+    /** Shared ladder runner: drives the auto dialog and routes its
+     *  outcome — online → done, needs-pair → prefilled pair dialog,
+     *  nothing found → manual entry. */
+    fun runLadder(afterPair: Boolean) {
+        showAuto = true
+        autoStep = ctx.getString(R.string.auto_step_reconnect)
+        autoJob = scope.launch {
+            val sink = com.boxagent.app.daemon.AutoStepSink { k, arg ->
+                autoStep = when (k) {
+                    "try" -> ctx.getString(R.string.auto_step_try, arg)
+                    "scan" -> ctx.getString(R.string.auto_step_scan)
+                    else -> ctx.getString(R.string.auto_step_reconnect)
+                }
+            }
+            val out = if (afterPair) app.daemon.connectAfterPair(sink)
+            else app.daemon.autoConnect(sink)
+            showAuto = false
+            when (out) {
+                AutoOutcome.Online -> {}
+                is AutoOutcome.NeedsPair -> {
+                    pairHost = out.host
+                    pairPort = out.port.toString()
+                    showPair = true
+                }
+                AutoOutcome.Manual -> {
+                    connectHint = ctx.getString(R.string.auto_none)
+                    showConnect = true
+                }
+            }
+        }
+    }
 
     if (showGuide) {
         PermissionsGuideScreen(app, onBack = { showGuide = false })
@@ -127,7 +167,7 @@ fun StatusScreen(app: BoxAgentApp) {
             ListRow(stringResource(R.string.re_pair), icon = Icons.Rounded.Link, divider = true,
                 onClick = { showPair = true })
             ListRow(stringResource(R.string.connect), icon = Icons.Rounded.PlayArrow, divider = true,
-                onClick = { showConnect = true })
+                onClick = { if (autoJob?.isActive != true) runLadder(afterPair = false) })
             ListRow(stringResource(R.string.enable_a11y), icon = Icons.Rounded.Accessibility, divider = true,
                 onClick = {
                     ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
@@ -186,17 +226,36 @@ fun StatusScreen(app: BoxAgentApp) {
         Box(Modifier.height(12.dp))
     }
 
+    if (showAuto) {
+        AlertDialog(
+            onDismissRequest = {
+                autoJob?.cancel()
+                showAuto = false
+            },
+            title = { Text(stringResource(R.string.auto_title)) },
+            text = { Text(autoStep, style = MaterialTheme.typography.bodyMedium) },
+            confirmButton = {},
+            dismissButton = {
+                PillButton(stringResource(R.string.cancel), filled = false, onClick = {
+                    autoJob?.cancel()
+                    showAuto = false
+                })
+            },
+        )
+    }
     if (showPair) {
         PairDialog(
+            initialHost = pairHost,
+            initialPort = pairPort,
             onPair = { host, port, code ->
                 scope.launch {
                     val r = app.daemon.pair(
                         host.trim(), port.trim().toIntOrNull() ?: 0, code.filter { it.isDigit() },
                     )
                     showPair = false
-                    // Only move on to connecting when pairing worked; the
-                    // failure is shown in the detail section.
-                    showConnect = r.isSuccess
+                    // Pairing flips to a connect endpoint — climb the rest
+                    // of the ladder automatically.
+                    if (r.isSuccess) runLadder(afterPair = true)
                 }
             },
             onDismiss = { showPair = false },
@@ -204,6 +263,7 @@ fun StatusScreen(app: BoxAgentApp) {
     }
     if (showConnect) {
         ConnectDialog(
+            hint = connectHint,
             onConnect = { host, port ->
                 scope.launch {
                     app.daemon.connectAndSpawn(host.trim(), port.trim().toIntOrNull() ?: 0)
@@ -232,9 +292,15 @@ private fun Chevron() {
 }
 
 @Composable
-fun PairDialog(onPair: (host: String, port: String, code: String) -> Unit, onDismiss: () -> Unit) {
-    var host by remember { mutableStateOf("127.0.0.1") }
-    var port by remember { mutableStateOf("") }
+fun PairDialog(
+    initialHost: String = "127.0.0.1",
+    initialPort: String = "",
+    onPair: (host: String, port: String, code: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    var host by remember { mutableStateOf(initialHost) }
+    var port by remember { mutableStateOf(initialPort) }
     var code by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -246,6 +312,12 @@ fun PairDialog(onPair: (host: String, port: String, code: String) -> Unit, onDis
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                PillButton(stringResource(R.string.open_wireless_debugging), filled = false, onClick = {
+                    ctx.startActivity(
+                        Intent(AndroidSettings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                })
                 TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) }, colors = bwTextFieldColors())
                 TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) }, colors = bwTextFieldColors())
                 TextField(value = code, onValueChange = { code = it }, label = { Text(stringResource(R.string.pairing_code)) }, colors = bwTextFieldColors())
@@ -260,7 +332,11 @@ fun PairDialog(onPair: (host: String, port: String, code: String) -> Unit, onDis
 }
 
 @Composable
-fun ConnectDialog(onConnect: (host: String, port: String) -> Unit, onDismiss: () -> Unit) {
+fun ConnectDialog(
+    hint: String? = null,
+    onConnect: (host: String, port: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
     var host by remember { mutableStateOf("127.0.0.1") }
     var port by remember { mutableStateOf("") }
     AlertDialog(
@@ -268,6 +344,10 @@ fun ConnectDialog(onConnect: (host: String, port: String) -> Unit, onDismiss: ()
         title = { Text(stringResource(R.string.connect_spawn_title), style = MaterialTheme.typography.titleMedium) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                hint?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
                 Text(
                     stringResource(R.string.connect_dialog_hint),
                     style = MaterialTheme.typography.bodySmall,
