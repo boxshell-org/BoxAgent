@@ -40,6 +40,13 @@ fn parse_args() -> Result<Args> {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
+    // Detach from the launcher's session/process group: launchers that let
+    // us start without `setsid` (direct `sh`, some adbd paths) would
+    // otherwise leave us killable by the group's SIGHUP on exit. Fails
+    // harmlessly when already detached.
+    unsafe {
+        libc::setsid();
+    }
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)

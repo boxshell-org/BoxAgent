@@ -83,8 +83,14 @@ pub fn spawn_daemon(
     // One daemon at a time: a previous instance whose socket/token the app
     // lost (data cleared, crash before persisting) would otherwise run
     // forever. `-x` matches the process name only, never this `sh -c`.
+    //
+    // `trap '' HUP` before anything else: when this `sh` exits, the kernel
+    // SIGHUPs the orphaned process group — and the `setsid` binary is still
+    // being linked (~10ms) so it dies before it can detach. An ignored
+    // disposition survives fork+exec, so the daemon is immune from birth.
     let spawn = format!(
-        "pkill -x boxagentd; chmod 755 {p} && (setsid {p} --socket {s} --token {t} \
+        "trap '' HUP; pkill -x boxagentd; chmod 755 {p} && \
+         (setsid {p} --socket {s} --token {t} \
          </dev/null >/data/local/tmp/boxagentd.log 2>&1 &)",
         p = sq(remote_path),
         s = sq(socket_name),

@@ -16,7 +16,11 @@ object SkillCodec {
 
     private val SLUG = Regex("^[a-z0-9][a-z0-9-]{0,39}$")
     private val PARAM = Regex("^[A-Za-z_][A-Za-z0-9_]{0,30}$")
-    private val PLACEHOLDER = Regex("\\{\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\|\\s*([a-z]+)\\s*)?}}")
+    // The closing braces must be escaped too: the JVM's Pattern tolerates a
+    // bare `}`, but Android's ICU engine throws PatternSyntaxException on it
+    // — which kills the whole class initializer, not just this call.
+    private val PLACEHOLDER =
+        Regex("\\{\\{\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\|\\s*([a-z]+)\\s*)?\\}\\}")
 
     /** `Order coffee!` → `order-coffee`; non-Latin titles fall back to `skill-<hash>`. */
     fun slugify(title: String): String {
