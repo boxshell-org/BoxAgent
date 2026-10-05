@@ -183,9 +183,13 @@ object SkillCodec {
             a.remove("ref")
             val t = target ?: return null
             when (tool) {
-                "tap", "long_press" -> {
+                "tap", "long_press", "double_tap", "drag" -> {
                     if (!t.text.isNullOrBlank()) a.put("text", t.text)
                     else a.put("x", t.cx).put("y", t.cy)
+                }
+                "copy_text" -> {
+                    // No coordinate fallback — unlabeled targets can't replay.
+                    if (!t.text.isNullOrBlank()) a.put("text", t.text) else return null
                 }
                 "type_text" -> {
                     // A field's text is its current value — only its hint
@@ -193,6 +197,9 @@ object SkillCodec {
                     if (!t.hint.isNullOrBlank()) a.put("target_text", t.hint)
                 }
                 "scroll" -> if (!t.text.isNullOrBlank()) a.put("text", t.text)
+                "scroll_until" -> if (!t.text.isNullOrBlank()) {
+                    a.put("container_text", t.text)
+                }
             }
         }
         return SkillStep(tool, a.toString())

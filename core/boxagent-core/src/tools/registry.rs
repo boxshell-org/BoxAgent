@@ -277,9 +277,14 @@ pub fn all() -> Vec<Tool> {
         ),
         t(
             "file_read", "Read a file",
-            "Read a file (shell permissions). Returns up to 4000 chars of text when \
-             UTF-8 decodable; binary content is reported by size only.",
-            obj(json!({"path": s("Absolute path")}), &["path"]),
+            "Read a file (shell permissions). Returns text when UTF-8 decodable; \
+             binary content is reported by size only. Page long files with \
+             `offset`/`max_chars`.",
+            obj(json!({
+                "path": s("Absolute path"),
+                "offset": i("Skip this many characters first (default 0)"),
+                "max_chars": i("Cap on returned text (default 4000, max 20000)")
+            }), &["path"]),
             Readonly, "shell",
         ),
         t(
@@ -302,6 +307,38 @@ pub fn all() -> Vec<Tool> {
             "Running processes (`ps -A`), first 80 rows.",
             obj(json!({}), &[]),
             Readonly, "shell",
+        ),
+        t(
+            "notifications", "List notifications",
+            "Active status-bar notifications: source app, title and text. Useful \
+             for alerts, messages and one-time codes without opening apps.",
+            obj(json!({}), &[]),
+            Readonly, "shell",
+        ),
+        t(
+            "device_control", "Control the device",
+            "Whole-device controls (these affect the device, not one app): volume, \
+             mute, brightness, media keys, wifi and bluetooth radios.",
+            obj(json!({
+                "action": s("volume_up | volume_down | mute | brightness | \
+                             brightness_auto | media_play_pause | media_next | \
+                             media_previous | media_stop | wifi_on | wifi_off | \
+                             bluetooth_on | bluetooth_off"),
+                "value": i("For brightness: level 0-255")
+            }), &["action"]),
+            Moderate, "shell",
+        ),
+        t(
+            "app_permission", "Manage app permissions",
+            "List a package's runtime permissions (action=list) or grant/revoke \
+             one — e.g. android.permission.CAMERA, POST_NOTIFICATIONS. Granting \
+             is what unblocks apps that ask for access.",
+            obj(json!({
+                "package": s("Package name"),
+                "action": s("list | grant | revoke (default list)"),
+                "permission": s("For grant/revoke, e.g. android.permission.CAMERA")
+            }), &["package"]),
+            Moderate, "shell",
         ),
         t(
             "clipboard_get", "Read clipboard",
@@ -347,6 +384,20 @@ pub fn all() -> Vec<Tool> {
             obj(json!({"key": s("Key name or numeric code")}), &["key"]),
             Moderate, "shell",
         ).exposed(Expose::NoA11y),
+        t(
+            "http_request", "Make an HTTP request",
+            "HTTP(S) request from the phone itself: fetch an API response, \
+             download data or POST to a service. Returns status, content type \
+             and body (long bodies keep beginning and end).",
+            obj(json!({
+                "url": s("http:// or https:// URL"),
+                "method": s("GET | POST | PUT | PATCH | DELETE | HEAD (default GET)"),
+                "headers": {"type": "object", "description": "Request headers as name: value"},
+                "body": s("Request body (POST/PUT/PATCH)"),
+                "timeout_ms": i("Connect and read timeout (default 15000, max 30000)")
+            }), &["url"]),
+            Moderate, "app",
+        ),
         // ---------- a11y backend ----------
         t(
             "screen", "Read the screen",
@@ -436,14 +487,68 @@ pub fn all() -> Vec<Tool> {
             Moderate, "a11y",
         ),
         t(
+            "scroll_until", "Scroll until found",
+            "Scroll a list until `text`/`desc`/`resource_id` appears (up to \
+             max_times scrolls) — cheaper than repeated scroll calls when looking \
+             for something off-screen. Returns the screen with `found`.",
+            obj(json!({
+                "direction": s("up | down | left | right"),
+                "text": s("Stop when this text is on screen (regex ok)"),
+                "desc": s("Stop on this content-description (regex ok)"),
+                "resource_id": s("Stop on this view id (regex ok)"),
+                "ref": i("Scrollable element ref (or an element inside it)"),
+                "container_text": s("Text of an element inside the list to scroll"),
+                "max_times": i("Scroll budget (default 8, max 20)")
+            }), &["direction"]),
+            Moderate, "a11y",
+        ),
+        t(
+            "double_tap", "Double tap",
+            "Double-tap an element by ref or text, or at x,y — e.g. map zoom, \
+             selecting a word. Returns the updated screen.",
+            obj(json!({
+                "ref": i("Element ref from the screen"),
+                "text": s("Visible text or description of the element"),
+                "x": i("X coordinate"),
+                "y": i("Y coordinate")
+            }), &[]),
+            Moderate, "a11y",
+        ),
+        t(
+            "drag", "Drag an element",
+            "Press-hold an element (by ref or text, or from x,y) and drag it to \
+             to_x,to_y — for reordering lists, sliders and drag-and-drop. \
+             Returns the updated screen.",
+            obj(json!({
+                "ref": i("Element ref from the screen"),
+                "text": s("Visible text or description of the element"),
+                "x": i("Start X"), "y": i("Start Y"),
+                "to_x": i("Destination X"), "to_y": i("Destination Y"),
+                "duration_ms": i("Move duration (default 500)"),
+                "hold_ms": i("Press-and-hold before moving (default 350)")
+            }), &["to_x", "to_y"]),
+            Moderate, "a11y",
+        ),
+        t(
+            "copy_text", "Copy element text",
+            "Copy an element's or text field's text to the clipboard (use \
+             clipboard_get to read it). By ref or by its visible text.",
+            obj(json!({
+                "ref": i("Element ref from the screen"),
+                "text": s("Visible text or description of the element")
+            }), &[]),
+            Moderate, "a11y",
+        ),
+        t(
             "type_text", "Type into field",
             "Replace the text of an input field (by ref, by its text/hint, or the \
-             focused field). `submit` then presses the keyboard's enter/search action. \
-             Returns the updated screen.",
+             focused field; append=true adds instead). `submit` then presses the \
+             keyboard's enter/search action. Returns the updated screen.",
             obj(json!({
                 "text": s("Text to enter"),
                 "ref": i("Input field ref"),
                 "target_text": s("Field's current text or hint"),
+                "append": b("Append to existing text instead of replacing (default false)"),
                 "submit": b("Press enter/search afterwards (default false)")
             }), &["text"]),
             Moderate, "a11y",
@@ -451,18 +556,21 @@ pub fn all() -> Vec<Tool> {
         t(
             "key", "System key",
             "back | home | recents | notifications | quick_settings | power_dialog | \
-             lock | enter (keyboard action on the focused field). Returns the updated \
-             screen.",
+             lock | enter (keyboard action on the focused field). On the virtual \
+             screen: back, enter, tab, del, space, esc, up/down/left/right. \
+             Returns the updated screen.",
             obj(json!({"name": s("Key name")}), &["name"]),
             Moderate, "a11y",
         ),
         t(
             "wait_for", "Wait for UI state",
             "Wait until text appears on screen or an app is in front (or timeout). \
+             gone=true instead waits for it to DISAPPEAR (spinners, dialogs). \
              Use after actions that load slowly instead of sleeping.",
             obj(json!({
                 "text": s("Wait for this text/description (regex ok)"),
                 "package": s("Wait for this foreground package"),
+                "gone": b("Wait until the target is gone instead (default false)"),
                 "timeout_ms": i("Wait budget (default 10000, max 60000)")
             }), &[]),
             Readonly, "a11y",
@@ -678,7 +786,15 @@ mod tests {
             !full.contains(&"screenshot".into()),
             "no vision: no image tool"
         );
-        assert!(full.len() <= 32, "{} tools: {full:?}", full.len());
+        assert!(full.len() <= 42, "{} tools: {full:?}", full.len());
+        assert!(full.contains(&"scroll_until".into()));
+        assert!(full.contains(&"drag".into()));
+        assert!(full.contains(&"double_tap".into()));
+        assert!(full.contains(&"copy_text".into()));
+        assert!(full.contains(&"notifications".into()));
+        assert!(full.contains(&"device_control".into()));
+        assert!(full.contains(&"app_permission".into()));
+        assert!(full.contains(&"http_request".into()));
         assert!(!full.contains(&"skill".into()), "no skills: no skill tools");
         assert!(full.contains(&"save_skill".into()));
         let with_skills = names(&openai_tools(

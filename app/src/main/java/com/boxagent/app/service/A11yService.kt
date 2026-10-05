@@ -69,6 +69,11 @@ class A11yService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
+        // Only the display the agent works on counts: with a virtual
+        // screen, the user scrolling their real screen must not keep
+        // settle() waiting or rename the "current app" (and vice versa).
+        val d = displayOf(event)
+        if (d != Display.INVALID_DISPLAY && d != scopeDisplay()) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 lastPackage = event.packageName?.toString() ?: lastPackage
@@ -88,6 +93,37 @@ class A11yService : AccessibilityService() {
     }
 
     override fun onInterrupt() {}
+
+    /** The display tools act on: the virtual screen while one is attached. */
+    private fun scopeDisplay(): Int =
+        VScreenBridge.displayId.takeIf { it >= 0 } ?: Display.DEFAULT_DISPLAY
+
+    /** windowId → displayId, for events before API 33 (no getDisplayId). */
+    private val windowDisplay = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    @Volatile private var windowDisplayAt = 0L
+
+    private fun displayOf(e: AccessibilityEvent): Int {
+        if (Build.VERSION.SDK_INT >= 33) return e.displayId
+        // Without a virtual screen everything is the default display —
+        // skip the lookups entirely.
+        if (VScreenBridge.displayId < 0) return Display.INVALID_DISPLAY
+        if (e.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) windowDisplay.clear()
+        val wid = e.windowId
+        if (wid < 0) return Display.INVALID_DISPLAY
+        windowDisplay[wid]?.let { return it }
+        val now = SystemClock.uptimeMillis()
+        if (now - windowDisplayAt > 300) {
+            windowDisplayAt = now
+            runCatching {
+                val all = windowsOnAllDisplays
+                for (i in 0 until all.size()) {
+                    val disp = all.keyAt(i)
+                    all.valueAt(i).forEach { windowDisplay[it.id] = disp }
+                }
+            }
+        }
+        return windowDisplay[wid] ?: Display.INVALID_DISPLAY
+    }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         instance = null
@@ -159,6 +195,42 @@ class A11yService : AccessibilityService() {
                 .mapNotNull { runCatching { it.root }.getOrNull() }
         }
         return listOfNotNull(runCatching { rootInActiveWindow }.getOrNull())
+    }
+
+    /** Any app window on the scoped display? An empty virtual display
+     *  mirrors the physical one, so its pixels must not be shown then. */
+    fun hasScopeContent(): Boolean =
+        windowsForOps().any { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+
+    /**
+     * Append [text] to the focused text field of the scoped display via
+     * set-text — the virtual screen's fallback for characters key events
+     * can't type (CJK, emoji). Searches the scoped windows only:
+     * [findFocus] would happily return a field on the physical screen.
+     */
+    fun appendToFocused(text: String): Boolean {
+        var target: AccessibilityNodeInfo? = null
+        fun walk(n: AccessibilityNodeInfo, depth: Int) {
+            if (target != null || depth > 60) return
+            if (runCatching { n.isEditable && n.isFocused }.getOrDefault(false)) {
+                target = n
+                return
+            }
+            for (i in 0 until min(childCountOf(n), 80)) childAt(n, i)?.let { walk(it, depth + 1) }
+        }
+        activeRoots().forEach { walk(it, 0) }
+        val node = target ?: return false
+        val current = runCatching {
+            // Placeholder text shows up as `text` on empty fields.
+            if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
+        }.getOrDefault("")
+        val args = Bundle().apply {
+            putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, current + text,
+            )
+        }
+        return runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) }
+            .getOrDefault(false)
     }
 
     // ------------------------------------------------------------------
@@ -687,6 +759,136 @@ class A11yService : AccessibilityService() {
         return true to via
     }
 
+    /**
+     * Scroll a list until [text]/[desc]/[resId] is visible, at most
+     * [maxTimes] scrolls. The container is picked like [scroll] (ref or
+     * [containerText], else the screen's main list). Returns found + via.
+     */
+    suspend fun scrollUntil(
+        direction: String,
+        text: String?, desc: String?, resId: String?,
+        ref: Int?, containerText: String?, maxTimes: Int,
+    ): Pair<Boolean, String> {
+        if (text == null && desc == null && resId == null) {
+            return false to "give text, desc or resource_id to stop on"
+        }
+        var used = 0
+        for (i in 0 until maxTimes.coerceIn(1, 20)) {
+            if (findByLabel(text, desc, resId) != null) {
+                return true to "found" + if (used > 0) " after $used scrolls" else ""
+            }
+            val (ok, via) = scroll(direction, ref, containerText, 1)
+            if (!ok) return false to via
+            used++
+            settle(minMs = 60, quietMs = 150, maxMs = 500)
+        }
+        return if (findByLabel(text, desc, resId) != null) {
+            true to "found after $used scrolls"
+        } else {
+            false to "not found after $used scrolls"
+        }
+    }
+
+    private fun centerOf(node: AccessibilityNodeInfo): Pair<Float, Float>? {
+        val r = Rect()
+        if (runCatching { node.getBoundsInScreen(r) }.isSuccess && !r.isEmpty) {
+            return r.exactCenterX() to r.exactCenterY()
+        }
+        return null
+    }
+
+    /** Resolve the element selectors (ref / text-desc-id / x,y) into a
+     *  screen point; null pairs are reported as `error`. */
+    private fun pointFor(
+        ref: Int?, x: Float?, y: Float?, text: String?, desc: String?, resId: String?,
+    ): Pair<Pair<Float, Float>?, String?> {
+        if (ref != null) {
+            val n = nodeFor(ref) ?: return null to staleRef(ref)
+            return centerOf(n)?.let { it to null } ?: (null to "element has no on-screen bounds")
+        }
+        if (text != null || desc != null || resId != null) {
+            val n = findByLabel(text, desc, resId) ?: return null to "no matching element"
+            return centerOf(n)?.let { it to null } ?: (null to "element has no on-screen bounds")
+        }
+        if (x != null && y != null) return (x to y) to null
+        return null to "give ref, text, or x and y"
+    }
+
+    suspend fun doubleTap(
+        ref: Int?, x: Float?, y: Float?, text: String?, desc: String?, resId: String?,
+    ): Pair<Boolean, String> {
+        val (pt, error) = pointFor(ref, x, y, text, desc, resId)
+        val (cx, cy) = pt ?: return false to (error ?: "no target")
+        if (!touchTap(cx, cy)) return false to "gesture cancelled"
+        delay(110)
+        return touchTap(cx, cy) to "gesture"
+    }
+
+    /**
+     * Press-and-hold at the element/coords, then move to (toX,toY). On a
+     * virtual display the host injects the sequence; otherwise a
+     * two-stroke gesture (hold, continued into the move) does the drag.
+     */
+    suspend fun drag(
+        ref: Int?, x: Float?, y: Float?, text: String?, desc: String?, resId: String?,
+        toX: Float, toY: Float, durationMs: Long, holdMs: Long,
+    ): Pair<Boolean, String> {
+        val (pt, error) = pointFor(ref, x, y, text, desc, resId)
+        val (sx, sy) = pt ?: return false to (error ?: "no target")
+        VScreenBridge.touchBackend?.let {
+            return it.drag(sx, sy, toX, toY, durationMs, holdMs) to "host"
+        }
+        val hx = c(sx) + 0.01f
+        val hy = c(sy) + 0.01f
+        val hold = Path().apply { moveTo(c(sx), c(sy)); lineTo(hx, hy) }
+        val s1 = GestureDescription.StrokeDescription(
+            hold, 0, holdMs.coerceIn(50, 5_000), true,
+        )
+        // A continued stroke must begin where the previous one ended.
+        val move = Path().apply { moveTo(hx, hy); lineTo(c(toX), c(toY)) }
+        val s2 = s1.continueStroke(move, 0, durationMs.coerceIn(50, 30_000), false)
+        return dispatch(
+            GestureDescription.Builder().addStroke(s1).addStroke(s2).build(),
+        ) to "gesture"
+    }
+
+    /**
+     * The element's text for copy_text: editable fields try select-all +
+     * ACTION_COPY first (proper copy path, e.g. spans); the returned
+     * String is a fallback the caller writes to the clipboard itself.
+     * Returns (clipboardText or null, status): status "copied" means the
+     * copy action already filled the clipboard.
+     */
+    suspend fun copyText(
+        ref: Int?, text: String?, desc: String?, resId: String?,
+    ): Pair<String?, String> {
+        val node = when {
+            ref != null -> nodeFor(ref) ?: return null to staleRef(ref)
+            else -> findByLabel(text, desc, resId) ?: return null to "no matching element"
+        }
+        val content = runCatching {
+            if (node.isShowingHintText) null
+            else node.text?.toString() ?: node.contentDescription?.toString()
+        }.getOrNull()
+        if (runCatching { node.isEditable }.getOrDefault(false)) {
+            val len = content?.length ?: 0
+            if (len > 0) {
+                val sel = Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, len)
+                }
+                runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, sel) }
+                delay(60)
+                if (runCatching { node.performAction(AccessibilityNodeInfo.ACTION_COPY) }
+                        .getOrDefault(false)) {
+                    return null to "copied"
+                }
+            }
+        }
+        return content?.takeIf { it.isNotEmpty() }?.let { it to "text" }
+            ?: (null to "element has no text")
+    }
+
     private fun performScroll(n: AccessibilityNodeInfo, dir: String, area: Rect): Boolean {
         val directional = when (dir) {
             "down" -> AccessibilityAction.ACTION_SCROLL_DOWN
@@ -714,7 +916,7 @@ class A11yService : AccessibilityService() {
 
     suspend fun typeText(
         text: String, ref: Int?, selText: String?, selDesc: String?, selId: String?,
-        submit: Boolean,
+        submit: Boolean, append: Boolean = false,
     ): Pair<Boolean, String> {
         val node = if (ref != null) {
             val n = nodeFor(ref) ?: return false to staleRef(ref)
@@ -727,8 +929,14 @@ class A11yService : AccessibilityService() {
             runCatching { node.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
         }
         delay(80)
+        val content = if (append) {
+            val cur = runCatching {
+                if (node.isShowingHintText) "" else node.text?.toString().orEmpty()
+            }.getOrDefault("")
+            cur + text
+        } else text
         val args = Bundle().apply {
-            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, content)
         }
         if (!runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) }
                 .getOrDefault(false)) {
@@ -769,13 +977,15 @@ class A11yService : AccessibilityService() {
 
     suspend fun waitFor(
         text: String?, desc: String?, resId: String?, pkg: String?, timeoutMs: Long,
+        gone: Boolean = false,
     ): Boolean {
         if (pkg == null && text == null && desc == null && resId == null) return false
         val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(0, 60_000)
         while (System.currentTimeMillis() < deadline) {
-            if (pkg != null && foregroundPackage() == pkg) return true
-            if ((text != null || desc != null || resId != null) &&
-                findByLabel(text, desc, resId) != null) return true
+            val present = (pkg != null && foregroundPackage() == pkg) ||
+                ((text != null || desc != null || resId != null) &&
+                    findByLabel(text, desc, resId) != null)
+            if (present != gone) return true
             delay(200)
         }
         return false
@@ -838,12 +1048,17 @@ class A11yService : AccessibilityService() {
 
     /** Scales [src] to [maxSide], draws ref marks for [screen]'s shown
      *  elements and returns the JPEG. Works on any bitmap source — the
-     *  physical-display capture or the virtual-display host's PNG. */
-    fun markBitmap(src: Bitmap, screen: Screen, maxSide: Int = 1024): ByteArray {
-        val scale = min(1f, maxSide.toFloat() / maxOf(src.width, src.height))
-        val bmp = if (scale < 1f) {
+     *  physical-display capture or the virtual-display host's frame,
+     *  which may arrive pre-scaled: [coordWidth] is the width of the
+     *  space element bounds are in (defaults to the bitmap's own). */
+    fun markBitmap(
+        src: Bitmap, screen: Screen, maxSide: Int = 1024, coordWidth: Int = src.width,
+    ): ByteArray {
+        val fit = min(1f, maxSide.toFloat() / maxOf(src.width, src.height))
+        val scale = fit * src.width / coordWidth.coerceAtLeast(1)
+        val bmp = if (fit < 1f) {
             Bitmap.createScaledBitmap(
-                src, (src.width * scale).toInt(), (src.height * scale).toInt(), true,
+                src, (src.width * fit).toInt(), (src.height * fit).toInt(), true,
             ).also { src.recycle() }
         } else src
         val out = if (bmp.isMutable) bmp else bmp.copy(Bitmap.Config.ARGB_8888, true)

@@ -13,6 +13,7 @@ import com.boxagent.app.data.db.AuditEntry
 import com.boxagent.app.data.db.ToolCallRecord
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.vscreen.VScreenClient
+import com.boxagent.app.vscreen.VScreenError
 import com.boxagent.app.vscreen.VScreenManager
 import com.boxagent.app.skills.SkillCodec
 import com.boxagent.app.skills.SkillRepository
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.min
 
 /** Pending user approval for a risky tool call. */
 data class PendingConfirm(
@@ -269,10 +271,11 @@ class ToolRunner(
             "app_clear_data" -> shellExec("pm clear ${sq(a.getString("package"))}")
             "screen_capture" -> if (vs != null) {
                 runCatching {
-                    val png = vs.screenshot()
+                    vdGuardEmpty()?.let { return it }
+                    val shot = vs.screenshot("png", 100, 0)
                         ?: throw IllegalStateException("no frame rendered yet")
-                    ok().put("mime", "image/png")
-                        .put("data_b64", Base64.encodeToString(png, Base64.NO_WRAP))
+                    ok().put("mime", shot.mime)
+                        .put("data_b64", Base64.encodeToString(shot.bytes, Base64.NO_WRAP))
                 }.getOrElse { err(it) }
             } else screencapResult()
             "screen_info" -> if (vs != null) {
@@ -284,6 +287,7 @@ class ToolRunner(
                     .put("rotation", 0)
                     .put("display_id", st.displayId)
                     .put("virtual", true)
+                    .put("own_focus", st.ownFocus)
             } else runCatching {
                 // Real size incl. system bars — the coordinate space gestures
                 // use. App displayMetrics exclude the bars and ignore rotation.
@@ -343,9 +347,13 @@ class ToolRunner(
                     .getOrNull()?.takeIf { it.isNotEmpty() && !it.contains('�') }
                 if (asText != null) {
                     // Text is far cheaper (and readable) for the LLM than b64.
+                    val offset = a.optInt("offset", 0).coerceIn(0, asText.length)
+                    val maxChars = a.optInt("max_chars", 4000).coerceIn(1, 20_000)
+                    val slice = asText.drop(offset).take(maxChars)
                     ok().put("size", bytes.size)
-                        .put("text", asText.take(4000))
-                        .put("truncated", asText.length > 4000)
+                        .put("offset", offset)
+                        .put("text", slice)
+                        .put("truncated", offset + slice.length < asText.length)
                 } else {
                     ok().put("size", bytes.size)
                         .put("mime", "application/octet-stream")
@@ -363,6 +371,31 @@ class ToolRunner(
                 ok().put("entries", JSONArray(daemon.requireClient().fileList(a.getString("path"))))
             }.getOrElse { err(it) }
             "process_list" -> shellExec("ps -A -o PID,USER,NAME,%CPU,RSS | head -80")
+            "notifications" -> notificationsResult()
+            "device_control" -> {
+                val act = a.getString("action").lowercase().trim()
+                val cmd = deviceCmd(a) ?: return err(IllegalArgumentException(
+                    "unknown action \"$act\" — use brightness, brightness_auto, " +
+                        "or one of: ${DEVICE_ACTIONS.keys.joinToString()}"))
+                shellExec(cmd).put("action", act)
+            }
+            "app_permission" -> {
+                val pkg = a.getString("package")
+                when (a.optString("action", "list").lowercase()) {
+                    "grant" -> shellExec("pm grant ${sq(pkg)} ${sq(a.getString("permission"))}")
+                    "revoke" -> shellExec("pm revoke ${sq(pkg)} ${sq(a.getString("permission"))}")
+                    "list" -> runCatching {
+                        val r = daemon.requireClient()
+                            .exec("dumpsys package ${sq(pkg)}", 20_000)
+                        val (granted, denied) = parseRuntimePerms(r.stdout)
+                        ok().put("package", pkg)
+                            .put("granted", JSONArray(granted))
+                            .put("denied", JSONArray(denied))
+                    }.getOrElse { err(it) }
+                    else -> err(IllegalArgumentException("action must be list, grant or revoke"))
+                }
+            }
+            "http_request" -> httpRequest(a)
             "clipboard_get" -> runCatching {
                 val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
                     as android.content.ClipboardManager
@@ -376,19 +409,7 @@ class ToolRunner(
                 // the shell-uid daemon bypasses them.
                 shellExec("cmd clipboard get 2>/dev/null || service call clipboard 2 | head -4")
             }
-            "clipboard_set" -> runCatching {
-                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
-                    as android.content.ClipboardManager
-                cm.setPrimaryClip(
-                    android.content.ClipData.newPlainText("boxagent", a.getString("text")))
-                // Android 10+ silently denies background writes — verify.
-                val wrote = cm.primaryClip?.getItemAt(0)?.text?.toString() ==
-                    a.getString("text")
-                if (!wrote) throw IllegalStateException("denied")
-                ok()
-            }.getOrElse {
-                shellExec("cmd clipboard set ${sq(a.getString("text"))}")
-            }
+            "clipboard_set" -> clipboardSet(a.getString("text"))
             "input_tap" -> if (vs != null) {
                 runCatching { vs.tap(a.getDouble("x"), a.getDouble("y")); ok() }
                     .getOrElse { err(it) }
@@ -405,8 +426,14 @@ class ToolRunner(
                 "input swipe ${a.getInt("x1")} ${a.getInt("y1")} ${a.getInt("x2")} ${a.getInt("y2")} ${a.optInt("duration_ms", 300)}"
             )
             "input_text" -> if (vs != null) {
-                runCatching { vs.text(a.getString("text")); ok() }
-                    .getOrElse { err(it) }
+                val text = a.getString("text")
+                runCatching { vs.text(text); ok() }.getOrElse { e ->
+                    // Characters without key mappings (CJK, emoji): set the
+                    // focused field's text through accessibility instead.
+                    if (e is VScreenError && A11yService.instance?.appendToFocused(text) == true) {
+                        ok().put("via", "set_text")
+                    } else err(e)
+                }
             } else shellExec("input text ${sq(a.getString("text").replace(" ", "%s"))}")
             "input_key" -> if (vs != null) {
                 runCatching { vs.key(keyCodeOf(a.getString("key"))); ok() }
@@ -465,12 +492,50 @@ class ToolRunner(
                 )
                 result(ok_, via)
             }
+            "scroll_until" -> acting(a) {
+                val (found, via) = it.scrollUntil(
+                    a.getString("direction"),
+                    a.optStr("text"), a.optStr("desc"), a.optStr("resource_id"),
+                    a.optIntOrNull("ref"), a.optStr("container_text"),
+                    a.optInt("max_times", 8),
+                )
+                result(found, via).put("found", found)
+            }
+            "double_tap" -> acting(a) {
+                val (ok_, via) = it.doubleTap(
+                    a.optIntOrNull("ref"),
+                    a.optDoubleOrNull("x")?.toFloat(), a.optDoubleOrNull("y")?.toFloat(),
+                    a.optStr("text"), a.optStr("desc"), a.optStr("resource_id"),
+                )
+                result(ok_, via)
+            }
+            "drag" -> acting(a) {
+                val (ok_, via) = it.drag(
+                    a.optIntOrNull("ref"),
+                    a.optDoubleOrNull("x")?.toFloat(), a.optDoubleOrNull("y")?.toFloat(),
+                    a.optStr("text"), a.optStr("desc"), a.optStr("resource_id"),
+                    a.getDouble("to_x").toFloat(), a.getDouble("to_y").toFloat(),
+                    a.optLong("duration_ms", 500), a.optLong("hold_ms", 350),
+                )
+                result(ok_, via)
+            }
+            "copy_text" -> a11y { svc ->
+                val (text, via) = svc.copyText(
+                    a.optIntOrNull("ref"), a.optStr("text"), a.optStr("desc"),
+                    a.optStr("resource_id"),
+                )
+                when {
+                    via == "copied" -> result(true, "copied")
+                    text != null -> clipboardSet(text)
+                    else -> result(false, via)
+                }
+            }
             "type_text" -> acting(a) {
                 val submit = a.optBoolean("submit")
                 var (ok_, via) = it.typeText(
                     a.getString("text"), a.optIntOrNull("ref"),
                     a.optStr("target_text"), a.optStr("target_desc"), a.optStr("resource_id"),
-                    submit,
+                    submit, a.optBoolean("append"),
                 )
                 // Some fields don't expose the IME action — the shell
                 // daemon (if up) can still press enter.
@@ -489,9 +554,21 @@ class ToolRunner(
             "key" -> acting(a) {
                 val key = a.getString("name")
                 var ok_ = if (vs != null) {
-                    VD_KEYS[key.lowercase()]
-                        ?.let { runCatching { vs.key(it); true }.getOrDefault(false) }
-                        ?: it.globalKey(key) // system-level keys stay global
+                    val k = key.lowercase()
+                    val code = VD_KEYS[k]
+                    when {
+                        // HOME is a no-op on a display without system
+                        // decorations — "home" is the backdrop there.
+                        k == "home" -> vscreen.goHome()
+                        code != null -> runCatching { vs.key(code); true }.getOrDefault(false)
+                        // Shade, recents, power menu, lock: all live on the
+                        // physical screen the user is using.
+                        else -> return@acting result(
+                            false,
+                            "key \"$key\" isn't available on the virtual screen " +
+                                "(it would act on the user's physical screen)",
+                        )
+                    }
                 } else it.globalKey(key)
                 if (!ok_ && key.equals("enter", ignoreCase = true)) {
                     ok_ = if (vs != null) {
@@ -502,13 +579,15 @@ class ToolRunner(
                 result(ok_, if (ok_) key else "unsupported or failed: $key")
             }
             "wait_for" -> a11y { svc ->
+                val gone = a.optBoolean("gone")
                 val ok_ = svc.waitFor(
                     a.optStr("text"), a.optStr("desc"), a.optStr("resource_id"),
-                    a.optStr("package"), a.optLong("timeout_ms", 10_000),
+                    a.optStr("package"), a.optLong("timeout_ms", 10_000), gone,
                 )
-                result(ok_, if (ok_) "found" else "timed out").also { r ->
-                    if (ok_) attachScreen(svc, a, r, settleMaxMs = 1500)
-                }
+                result(ok_, if (ok_) (if (gone) "gone" else "found") else "timed out")
+                    // On timeout the screen is the useful part — the model
+                    // sees what's actually there instead of re-reading.
+                    .also { r -> attachScreen(svc, a, r, settleMaxMs = 1500) }
             }
             "screenshot" -> if (vs != null) {
                 vdScreenshot(vs)
@@ -607,6 +686,168 @@ class ToolRunner(
         return runCatching { cli.exec("input keyevent 66", 5_000).exit == 0 }.getOrDefault(false)
     }
 
+    /** In-app clipboard write, with a shell fallback for the background
+     *  write restrictions added in Android 10. */
+    private suspend fun clipboardSet(text: String): JSONObject = runCatching {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE)
+            as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("boxagent", text))
+        // Android 10+ silently denies background writes — verify.
+        if (cm.primaryClip?.getItemAt(0)?.text?.toString() != text) {
+            throw IllegalStateException("denied")
+        }
+        ok()
+    }.getOrElse {
+        shellExec("cmd clipboard set ${sq(text)}")
+    }
+
+    /** Active status-bar notifications, parsed out of `dumpsys
+     *  notification` — extras formatting differs across builds, so the
+     *  parser collects generously and falls back to clipped raw output. */
+    private suspend fun notificationsResult(): JSONObject = runCatching {
+        val r = daemon.requireClient().exec("dumpsys notification", 15_000)
+        val items = parseNotifications(r.stdout)
+        ok().put("count", items.size)
+            .put("notifications", JSONArray(items))
+            .apply {
+                if (items.isEmpty() && r.stdout.isNotBlank()) {
+                    put("note", "could not parse notification records; raw excerpt attached")
+                    put("raw", clipMiddle(r.stdout, 2000))
+                }
+            }
+    }.getOrElse { err(it) }
+
+    private fun parseNotifications(dump: String): List<JSONObject> {
+        // Blocks start at "  NotificationRecord(0x…: pkg=…" and end at
+        // the next record or an unindented section header.
+        val blocks = Regex(
+            """(?ms)^\s+NotificationRecord\(.*?(?=^\s+NotificationRecord\(|^\S|\z)""",
+        ).findAll(dump).toList()
+        val out = mutableListOf<JSONObject>()
+        for (b in blocks.take(30)) {
+            val block = b.value
+            val header = block.lineSequence().first()
+            val pkg = Regex("""pkg=(\S+)""").find(header)?.groupValues?.get(1)
+                ?: continue
+            fun extra(name: String): String? =
+                Regex("""(?m)^\s*android\.$name=(.*)$""").find(block)
+                    ?.groupValues?.get(1)
+                    ?.replace(Regex("""\s*\(\d+\)$"""), "")
+                    ?.trim()?.take(200)?.takeIf { it.isNotEmpty() }
+            val title = extra("title") ?: extra("subText") ?: continue
+            val text = extra("bigText")?.takeIf {
+                it.length > (extra("text")?.length ?: 0)
+            } ?: extra("text")
+            val whenMs = Regex("""when=(\d+)""").find(block)
+                ?.groupValues?.get(1)?.toLongOrNull()
+            out += JSONObject()
+                .put("package", pkg)
+                .put("title", title)
+                .apply {
+                    text?.let { put("text", it) }
+                    whenMs?.let { put("post_time_ms", it) }
+                }
+        }
+        return out
+    }
+
+    /** `dumpsys package <pkg>` → runtime permissions section:
+     *  `    android.permission.X: granted=true, flags=[…]` */
+    private fun parseRuntimePerms(dump: String): Pair<List<String>, List<String>> {
+        val granted = mutableListOf<String>()
+        val denied = mutableListOf<String>()
+        var inSection = false
+        for (line in dump.lineSequence()) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("runtime permissions:")) { inSection = true; continue }
+            if (inSection) {
+                // Section ends at a less-indented or blank line.
+                if (trimmed.isEmpty() || line.take(4).isNotBlank()) break
+                val m = Regex("""^(\S+): granted=(true|false)""").find(trimmed) ?: continue
+                (if (m.groupValues[2] == "true") granted else denied) += m.groupValues[1]
+            }
+        }
+        return granted.sorted() to denied.sorted()
+    }
+
+    /** Map a device_control action to its shell command; null = unknown. */
+    private fun deviceCmd(a: JSONObject): String? {
+        val act = a.getString("action").lowercase().trim()
+        if (act == "brightness") {
+            val v = a.optIntOrNull("value")
+                ?: throw IllegalArgumentException("brightness needs value 0-255")
+            return "settings put system screen_brightness_mode 0;" +
+                " settings put system screen_brightness ${v.coerceIn(0, 255)}"
+        }
+        return DEVICE_ACTIONS[act]
+    }
+
+    /** In-app HTTP client — the phone itself calls the URL (no proxy
+     *  through the model), so it works on any connection the device has. */
+    private suspend fun httpRequest(a: JSONObject): JSONObject =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val url = java.net.URL(a.getString("url"))
+                require(url.protocol == "http" || url.protocol == "https") {
+                    "only http/https URLs"
+                }
+                val method = a.optString("method", "GET").uppercase()
+                require(method in HTTP_METHODS) { "unsupported method $method" }
+                val timeout = a.optLong("timeout_ms", 15_000).coerceIn(1_000, 30_000).toInt()
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = method
+                    connectTimeout = timeout
+                    readTimeout = timeout
+                    instanceFollowRedirects = a.optBoolean("follow_redirects", true)
+                    a.optJSONObject("headers")?.let { h ->
+                        h.keys().forEach { k -> setRequestProperty(k, h.getString(k)) }
+                    }
+                    val body = a.optStr("body")
+                    if (body != null && method in BODY_METHODS) {
+                        doOutput = true
+                        outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                    }
+                }
+                try {
+                    val status = conn.responseCode
+                    val stream = if (status >= 400) conn.errorStream else conn.inputStream
+                    val bytes = stream?.let { readCapped(it, HTTP_MAX_BODY) }
+                    val text = bytes?.let {
+                        runCatching { String(it, Charsets.UTF_8) }
+                            .getOrNull()?.takeIf { t -> !t.contains('�') }
+                    }
+                    ok().put("status", status)
+                        .put("final_url", conn.url.toString())
+                        .put("content_type", conn.contentType ?: JSONObject.NULL)
+                        .apply {
+                            if (text != null) {
+                                put("body", clipMiddle(text, 4000))
+                                put("body_chars", text.length)
+                            } else if (bytes != null) {
+                                put("body_bytes", bytes.size)
+                            }
+                        }
+                } finally {
+                    conn.disconnect()
+                }
+            }.getOrElse { err(it) }
+        }
+
+    private fun readCapped(stream: java.io.InputStream, cap: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream(min(cap, 8192))
+        val buf = ByteArray(8192)
+        stream.use { s ->
+            while (true) {
+                val want = min(buf.size, cap - out.size())
+                if (want <= 0) break
+                val n = s.read(buf, 0, want)
+                if (n < 0) break
+                out.write(buf, 0, n)
+            }
+        }
+        return out.toByteArray()
+    }
+
     private data class App(val label: String, val pkg: String, val system: Boolean)
 
     private fun launchableApps(): List<App> {
@@ -679,25 +920,40 @@ class ToolRunner(
             .put("data_b64", Base64.encodeToString(bytes, Base64.NO_WRAP))
     }.getOrElse { err(it) }
 
-    /** Vision screenshot off the virtual display: host PNG + a11y ref
-     *  marks drawn on top (same set-of-marks shape the model knows). */
+    /** Vision screenshot off the virtual display: the host downscales and
+     *  JPEG-encodes (a full-size PNG over the socket costs ~10x more),
+     *  then a11y ref marks go on top — same set-of-marks shape the model
+     *  knows. Bounds are in display pixels, hence coordWidth. */
     private suspend fun vdScreenshot(vs: VScreenClient): JSONObject {
         val svc = A11yService.instance ?: A11yService.awaitInstance(2_500)
             ?: return JSONObject().put("ok", false)
                 .put("error", "accessibility service not enabled")
         return withContext(Dispatchers.Default) {
             runCatching {
-                val png = vs.screenshot()
+                vdGuardEmpty()?.let { return@runCatching it }
+                val shot = vs.screenshot("jpeg", 85, VISION_MAX_SIDE)
                     ?: throw IllegalStateException("no frame rendered yet")
                 val screen = svc.snapshot()
-                val bmp = android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(shot.bytes, 0, shot.bytes.size)
                     ?: throw IllegalStateException("frame decode failed")
-                val jpeg = svc.markBitmap(bmp, screen)
+                val jpeg = svc.markBitmap(
+                    bmp, screen, VISION_MAX_SIDE, coordWidth = shot.srcW.takeIf { it > 0 } ?: bmp.width,
+                )
                 ok().put("mime", "image/jpeg")
                     .put("image_b64", Base64.encodeToString(jpeg, Base64.NO_WRAP))
                     .put("screen", screen.render())
             }.getOrElse { err(it) }
         }
+    }
+
+    /** An empty virtual display mirrors the physical one — its pixels
+     *  would be the user's real screen. Error result in that case. */
+    private fun vdGuardEmpty(): JSONObject? {
+        val svc = A11yService.instance ?: return null
+        if (svc.hasScopeContent()) return null
+        return JSONObject().put("ok", false).put(
+            "error", "virtual screen is empty — open an app (or key home) first",
+        )
     }
 
     private fun keyCodeOf(name: String): Int {
@@ -723,23 +979,55 @@ class ToolRunner(
         }
 
         val SETTINGS_NAMESPACES = setOf("system", "secure", "global")
+
+        /** device_control actions that map 1:1 to a shell command
+         *  (brightness takes a `value` and is built in deviceCmd). */
+        val DEVICE_ACTIONS = mapOf(
+            "volume_up" to "input keyevent KEYCODE_VOLUME_UP",
+            "volume_down" to "input keyevent KEYCODE_VOLUME_DOWN",
+            "mute" to "input keyevent KEYCODE_MUTE",
+            "media_play_pause" to "input keyevent KEYCODE_MEDIA_PLAY_PAUSE",
+            "media_next" to "input keyevent KEYCODE_MEDIA_NEXT",
+            "media_previous" to "input keyevent KEYCODE_MEDIA_PREVIOUS",
+            "media_stop" to "input keyevent KEYCODE_MEDIA_STOP",
+            "wifi_on" to "svc wifi enable",
+            "wifi_off" to "svc wifi disable",
+            "bluetooth_on" to "svc bluetooth enable",
+            "bluetooth_off" to "svc bluetooth disable",
+            "brightness_auto" to "settings put system screen_brightness_mode 1",
+        )
+        val HTTP_METHODS = setOf("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD")
+        val BODY_METHODS = setOf("POST", "PUT", "PATCH")
+        const val HTTP_MAX_BODY = 256 * 1024
         /** Display-semantic tools: when the virtual screen is on these must
          *  all run on it, never on the physical panel. */
         val VD_SCOPED = setOf(
             "screen", "ui_tree", "ui_find", "wait_for",
-            "tap", "long_press", "swipe", "scroll", "pinch", "type_text", "key",
+            "tap", "long_press", "swipe", "scroll", "scroll_until", "pinch",
+            "double_tap", "drag", "type_text", "key", "copy_text",
             "screenshot", "screen_capture", "screen_info",
             "input_tap", "input_swipe", "input_text", "input_key",
             "app_launch", "launch_intent",
         )
-        /** Navigation keys the virtual display accepts by keycode; the
-         *  rest (notifications, power dialog…) are system-level globals. */
+        /** Keys injected into the virtual display by keycode; "home" is
+         *  the backdrop, everything else is physical-screen-only. */
         val VD_KEYS = mapOf(
             "back" to android.view.KeyEvent.KEYCODE_BACK,
-            "home" to android.view.KeyEvent.KEYCODE_HOME,
-            "recents" to android.view.KeyEvent.KEYCODE_APP_SWITCH,
             "enter" to android.view.KeyEvent.KEYCODE_ENTER,
+            "tab" to android.view.KeyEvent.KEYCODE_TAB,
+            "del" to android.view.KeyEvent.KEYCODE_DEL,
+            "backspace" to android.view.KeyEvent.KEYCODE_DEL,
+            "space" to android.view.KeyEvent.KEYCODE_SPACE,
+            "esc" to android.view.KeyEvent.KEYCODE_ESCAPE,
+            "escape" to android.view.KeyEvent.KEYCODE_ESCAPE,
+            "up" to android.view.KeyEvent.KEYCODE_DPAD_UP,
+            "down" to android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+            "left" to android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+            "right" to android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+            "move_home" to android.view.KeyEvent.KEYCODE_MOVE_HOME,
+            "move_end" to android.view.KeyEvent.KEYCODE_MOVE_END,
         )
+        const val VISION_MAX_SIDE = 1024
         val ACTION_RE = Regex("""^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*\.[A-Z][A-Z0-9_]*$""")
         const val GRANT_FLAGS = Intent.FLAG_GRANT_READ_URI_PERMISSION or
             Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
