@@ -53,6 +53,7 @@ class Settings(private val context: Context) {
         val KEY_VSCREEN_W = intPreferencesKey("vscreen_w")
         val KEY_VSCREEN_H = intPreferencesKey("vscreen_h")
         val KEY_VSCREEN_DPI = intPreferencesKey("vscreen_dpi")
+        val KEY_VSCREEN_ENDPOINT = stringPreferencesKey("vscreen_endpoint")
 
         /**
          * Built-in prompts older builds persisted as the "system prompt"
@@ -145,6 +146,8 @@ class Settings(private val context: Context) {
     val vscreenW: Flow<Int> = data.map { it[KEY_VSCREEN_W] ?: 0 }
     val vscreenH: Flow<Int> = data.map { it[KEY_VSCREEN_H] ?: 0 }
     val vscreenDpi: Flow<Int> = data.map { it[KEY_VSCREEN_DPI] ?: 0 }
+    /** `tcp:<port>` of the running vscreen host ("" = none spawned). */
+    val vscreenEndpoint: Flow<String> = data.map { it[KEY_VSCREEN_ENDPOINT] ?: "" }
 
     /** User-saved provider presets (name/baseUrl/model) as a JSON array. */
     val customProviders: Flow<List<LlmProfile>> = data.map { p ->
@@ -219,6 +222,7 @@ class Settings(private val context: Context) {
     suspend fun setLearnSkills(v: Boolean) = context.prefs.edit { it[KEY_LEARN_SKILLS] = v }
     suspend fun setSeededSkills(v: Set<String>) = context.prefs.edit { it[KEY_SEEDED_SKILLS] = v }
     suspend fun setVscreen(v: Boolean) = context.prefs.edit { it[KEY_VSCREEN] = v }
+    suspend fun setVscreenEndpoint(v: String) = context.prefs.edit { it[KEY_VSCREEN_ENDPOINT] = v }
     suspend fun setVscreenSize(w: Int, h: Int, dpi: Int) = context.prefs.edit {
         it[KEY_VSCREEN_W] = w
         it[KEY_VSCREEN_H] = h
