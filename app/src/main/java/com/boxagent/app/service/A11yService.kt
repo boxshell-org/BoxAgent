@@ -844,11 +844,16 @@ class A11yService : AccessibilityService() {
         val s1 = GestureDescription.StrokeDescription(
             hold, 0, holdMs.coerceIn(50, 5_000), true,
         )
-        // A continued stroke must begin where the previous one ended.
+        // Continued strokes must go out in separate dispatchGesture calls:
+        // the willContinue stroke keeps the finger down, then the move
+        // continues it in a second dispatch.
+        if (!dispatch(GestureDescription.Builder().addStroke(s1).build())) {
+            return false to "gesture"
+        }
         val move = Path().apply { moveTo(hx, hy); lineTo(c(toX), c(toY)) }
         val s2 = s1.continueStroke(move, 0, durationMs.coerceIn(50, 30_000), false)
         return dispatch(
-            GestureDescription.Builder().addStroke(s1).addStroke(s2).build(),
+            GestureDescription.Builder().addStroke(s2).build(),
         ) to "gesture"
     }
 

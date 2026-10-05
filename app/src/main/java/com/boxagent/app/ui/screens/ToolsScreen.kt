@@ -65,6 +65,7 @@ fun ToolsList(tools: List<ToolSpec>, onSelect: (ToolSpec) -> Unit) {
     val groups = listOf(
         "a11y" to stringResource(R.string.tools_group_ui),
         "shell" to stringResource(R.string.tools_group_shell),
+        "app" to stringResource(R.string.tools_group_app),
         "meta" to stringResource(R.string.tools_group_agent),
     )
     LazyColumn(

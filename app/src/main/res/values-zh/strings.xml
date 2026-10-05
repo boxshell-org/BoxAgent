@@ -363,4 +363,5 @@
     <string name="tools_group_ui">屏幕与手势</string>
     <string name="tools_group_shell">Shell（uid 2000）</string>
     <string name="tools_group_agent">智能体</string>
+    <string name="tools_group_app">设备端</string>
 </resources>

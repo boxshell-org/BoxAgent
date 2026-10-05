@@ -372,4 +372,5 @@
     <string name="tools_group_ui">Screen &amp; gestures</string>
     <string name="tools_group_shell">Shell (uid 2000)</string>
     <string name="tools_group_agent">Agent</string>
+    <string name="tools_group_app">On-device</string>
 </resources>

@@ -705,7 +705,9 @@ class ToolRunner(
      *  notification` — extras formatting differs across builds, so the
      *  parser collects generously and falls back to clipped raw output. */
     private suspend fun notificationsResult(): JSONObject = runCatching {
-        val r = daemon.requireClient().exec("dumpsys notification", 15_000)
+        // --noredact unwraps extra values (shell is allowed); without it
+        // dumpsys prints `String [length=N]` placeholders.
+        val r = daemon.requireClient().exec("dumpsys notification --noredact", 15_000)
         val items = parseNotifications(r.stdout)
         ok().put("count", items.size)
             .put("notifications", JSONArray(items))
@@ -729,11 +731,16 @@ class ToolRunner(
             val header = block.lineSequence().first()
             val pkg = Regex("""pkg=(\S+)""").find(header)?.groupValues?.get(1)
                 ?: continue
-            fun extra(name: String): String? =
-                Regex("""(?m)^\s*android\.$name=(.*)$""").find(block)
-                    ?.groupValues?.get(1)
-                    ?.replace(Regex("""\s*\(\d+\)$"""), "")
-                    ?.trim()?.take(200)?.takeIf { it.isNotEmpty() }
+            fun extra(name: String): String? {
+                val raw = Regex("""(?m)^\s*android\.$name=(.*)$""").find(block)
+                    ?.groupValues?.get(1)?.trim() ?: return null
+                // Extras print as `String (value)`; redacted builds show
+                // `String [length=N]` — treat the placeholder as absent.
+                if (raw.contains("[length=") || raw == "null") return null
+                val v = Regex("""^\w+ \((.*)\)$""").find(raw)
+                    ?.groupValues?.get(1) ?: raw
+                return v.take(200).takeIf { it.isNotEmpty() && it != "null" }
+            }
             val title = extra("title") ?: extra("subText") ?: continue
             val text = extra("bigText")?.takeIf {
                 it.length > (extra("text")?.length ?: 0)
