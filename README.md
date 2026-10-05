@@ -37,7 +37,7 @@ or pick in Settings).
 app/          Kotlin shell — Compose UI, A11yService, AgentService (FGS),
               DaemonManager/Client, ToolRunner (confirm gate + audit), Room
 core/
-  boxagentd      daemon pushed to /data/local/tmp; abstract-socket JSON frames
+  boxagentd      daemon pushed to /data/local/tmp; loopback-TCP JSON frames
   adb-tls        wireless-debugging pairing: TLS + SPAKE2 (EKM-bound) +
                  AES-128-GCM PeerInfo; AOSP adb pubkey encoding
   boxagent-core  JNI: tool registry, OpenAI-compatible SSE agent loop, adb ops

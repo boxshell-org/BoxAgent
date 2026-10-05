@@ -25,7 +25,8 @@ gradle.properties.
 ## Build
 
     # Rust workspace check + tests (host; includes a daemon integration test
-    # over a real abstract socket and agent-loop tests against a mock LLM)
+    # over real loopback TCP + the legacy abstract socket, SPAKE2 known-answer
+    # vectors from BoringSSL, and agent-loop tests against a mock LLM)
     cd core && cargo test --workspace
 
     # Kotlin JVM unit tests (screen model, skills codec, markdown, settings
@@ -47,9 +48,18 @@ gradle.properties.
 
 - `core/boxagent-proto` — length-prefixed JSON frames shared app<->daemon
 - `core/boxagentd` — pushed to /data/local/tmp, runs as shell uid 2000,
-  abstract Unix socket + token auth, streamed exec / fs / screencap
+  127.0.0.1 TCP (`--port`) + token auth, streamed exec / fs / screencap.
+  Never an abstract/unix socket for the app: SELinux denies
+  `untrusted_app → shell connectto` on user builds (redroid is permissive,
+  so it only *looks* fine there)
 - `core/adb-tls` — wireless-debugging pairing (TLS client-cert, SPAKE2 with
-  EKM-bound password, AES-128-GCM PeerInfo) + AOSP adb pubkey encoding
+  EKM-bound password, AES-128-GCM PeerInfo) + AOSP adb pubkey encoding.
+  M/N are BoringSSL's points (not RFC 9382's) — pinned by tests
+- `vscreen/` — shell-uid `app_process` host owning the virtual display
+  (loopback TCP like the daemon); `app/vscreen/` — manager, client, the
+  backdrop activity that keeps the display from mirroring the real screen
+- `app/daemon/PairingService` — pairing code typed into an inline-reply
+  notification so Settings' pairing dialog stays open
 - `core/boxagent-core` — JNI lib: tool registry (capability-filtered tool
   set), OpenAI-compatible SSE LLM client, agent loop (`act` batching),
   `context.rs` (screen dedup/elision, images, repeat hints, usage),

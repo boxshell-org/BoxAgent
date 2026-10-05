@@ -107,18 +107,19 @@ boxagent/
 Self-contained flow, modeled on how Shizuku/LADB work but implemented in our Rust `adb-tls` crate:
 
 1. User enables **Developer Options → Wireless Debugging**.
-2. App discovers the pairing service via mDNS (`_adb-tls-pairing._tcp`) — or the user taps "Pair with pairing code" and types the port + 6-digit code manually.
+2. App discovers the pairing service via mDNS (`_adb-tls-pairing._tcp`, this device's own services only, reached via 127.0.0.1). The 6-digit code is typed into an inline-reply notification (`PairingService`) so Settings' pairing dialog — whose pairing service dies when it closes — stays open; a manual form remains as fallback.
 3. `adb-tls` performs SPAKE2-based TLS pairing, registers our ADB keypair (stored in Keystore-wrapped storage).
 4. App rediscovers `_adb-tls-connect._tcp`, opens a TLS ADB session (`CNXN/AUTH/OPEN/WRTE`), then:
    - `sync:` pushes `boxagentd` (shipped in `jniLibs` as `libboxagentd.so`, copied to files dir at install) to `/data/local/tmp/boxagentd`,
-   - `shell:` runs `chmod 755` + exec with args: `--socket @boxagentd.<rand> --token <otp>`,
-   - daemon binds an abstract Unix socket; app connects, authenticates with the one-time token (rotated each spawn), daemon discards the arg token after first auth and pins the app by uid.
+   - `shell:` runs `chmod 755` + exec with args: `--port <free loopback port> --token <otp>`,
+   - daemon binds 127.0.0.1 only; app connects, authenticates with the one-time token (rotated each spawn); unauthenticated peers are dropped after 5 s.
+5. Once up, the daemon grants the app `WRITE_SECURE_SETTINGS` (`pm grant`, a development permission), which lets the app switch wireless debugging back on after a reboot or Wi-Fi change and reconnect with no human in the loop.
 
 **Fallback paths:** manual `adb shell` command from a PC (app displays the exact command), and optional **Shizuku backend** if Shizuku is already installed — both selectable in Settings → Privilege backend.
 
 ### 4.4 IPC
 
-- Transport: abstract-namespace Unix domain socket.
+- Transport: 127.0.0.1 TCP. Not an abstract Unix socket: SELinux on user builds denies `untrusted_app → shell unix_stream_socket connectto`; the one-time token is what keeps other local apps out.
 - Codec: length-prefixed JSON frames (4-byte BE length + JSON), defined once in `proto.rs` and mirrored in Kotlin via kotlinx-serialization.
 - Message types: `Exec`, `ExecResult(streaming)`, `FileRead`, `FileWrite`, `Screencap`, `Ping`, `Auth`, `Err`. Requests carry `id`; responses correlate by `id`.
 
@@ -250,7 +251,7 @@ Design execution per `DESIGN.md` (Apple) adapted to Android:
 ### F7 — Security & privacy
 
 - API key + ADB keypair in Keystore-backed encrypted storage; hardware-backed when available.
-- Daemon socket: one-time token at spawn → uid pinning of the connected app; reject all other peers.
+- Daemon socket: loopback-only TCP, one-time token at spawn; peers that don't authenticate within 5 s are dropped.
 - Confirmation policy levels: `strict` (confirm all non-readonly), `balanced` (confirm destructive only, default), `autonomous` (no confirms — behind a scary toggle + warning sheet).
 - Audit log is append-only within a session export; user can wipe it in Settings.
 - No analytics, no crash telemetry, no third-party trackers. Network egress only to the configured LLM endpoint and ADB localhost TLS.
