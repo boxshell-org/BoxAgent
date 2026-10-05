@@ -166,6 +166,11 @@ dependencies {
     testImplementation("org.json:json:20240303")
 }
 
-// The virtual-display host must be dexed before assets are packaged.
-tasks.matching { it.name == "mergeDebugAssets" || it.name == "mergeReleaseAssets" }
+// The virtual-display host must be dexed before assets are packaged — and
+// before release lintVital walks the assets dir, or Gradle's implicit-input
+// check fails the release build.
+tasks.matching {
+    it.name == "mergeDebugAssets" || it.name == "mergeReleaseAssets" ||
+        it.name.lowercase().contains("lintvital")
+}
     .configureEach { dependsOn(":vscreen:dexJar") }
