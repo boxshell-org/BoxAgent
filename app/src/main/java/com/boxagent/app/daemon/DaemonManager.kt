@@ -1,6 +1,8 @@
 package com.boxagent.app.daemon
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.provider.Settings as AndroidSettings
 import android.util.Base64
 import com.boxagent.app.BuildConfig
 import com.boxagent.app.bridge.Core
@@ -12,7 +14,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -45,8 +46,10 @@ sealed interface AutoOutcome {
     /** Wireless debugging is up but unpaired — the only step that needs
      *  a human (the 6-digit code from the system pairing dialog). */
     data class NeedsPair(val host: String, val port: Int) : AutoOutcome
-    /** Nothing discoverable — fall back to manual host/port entry. */
-    data object Manual : AutoOutcome
+    /** Nothing reachable. [wirelessOff]: wireless debugging is switched
+     *  off and BoxAgent can't turn it back on itself (it can once the
+     *  daemon has run once — see [DaemonManager.grantSelfSecureSettings]). */
+    data class Manual(val wirelessOff: Boolean = false) : AutoOutcome
 }
 
 /**
@@ -120,7 +123,9 @@ class DaemonManager(
         return runCatching {
             val pem = ensureKey()
             val daemonBytes = daemonBinary()
-            val socket = "boxagentd.${rand.nextInt().toString(16)}"
+            // Loopback TCP, not an abstract socket: SELinux denies apps
+            // `connectto` on shell-domain unix sockets (see HelperConn).
+            val socket = HelperConn.tcp(HelperConn.freePort())
             val token = ByteArray(24).also { rand.nextBytes(it) }
                 .joinToString("") { "%02x".format(it) }
             val daemonB64 = Base64.encodeToString(daemonBytes, Base64.NO_WRAP)
@@ -134,25 +139,21 @@ class DaemonManager(
             if (!resp.optBoolean("ok")) error(resp.optString("error"))
 
             // Give the daemon a moment to bind, then connect.
+            // Stop at the first answer — every extra connect leaks a socket.
             var cli: DaemonClient? = null
-            var lastErr: Exception? = null
-            repeat(8) {
-                try {
-                    cli = DaemonClient.connect(socket, token)
-                } catch (e: Exception) {
-                    lastErr = e
-                }
-                if (cli != null) return@repeat
-                delay(400)
+            for (attempt in 0 until 10) {
+                cli = DaemonClient.connect(socket, token)
+                if (cli != null) break
+                delay(300)
             }
             if (cli == null) {
-                // The spawn "succeeded" but nothing is listening: the daemon
+                // The spawn "succeeded" but nothing answers: the daemon
                 // died on start. Its log says why (bad arch, noexec, bind).
                 val log = runCatching {
                     JSONObject(Core.nativeAdbShell(pem, host, port, "tail -n 5 $LOG_PATH"))
                         .optJSONObject("data")?.optString("output")?.trim()
                 }.getOrNull()
-                val base = lastErr?.message ?: "socket connect failed"
+                val base = DaemonClient.lastError ?: "daemon did not answer"
                 throw IllegalStateException(
                     if (log.isNullOrEmpty()) base else "$base — daemon log: $log",
                 )
@@ -171,6 +172,7 @@ class DaemonManager(
                 daemonVersion = cli!!.daemonVersion,
             )
             startWatchdog()
+            scope.launch { grantSelfSecureSettings() }
             cli
         }.onFailure {
             if (it is kotlinx.coroutines.CancellationException) throw it
@@ -196,7 +198,11 @@ class DaemonManager(
             cli.close()
             return@withLock null
         }
-        if (cli.daemonVersion != BuildConfig.VERSION_NAME) {
+        // A daemon from before the TCP switch listens on an abstract
+        // socket only (reachable on permissive builds alone) — replace it
+        // like a version mismatch so the app ends up on loopback TCP.
+        val legacy = !HelperConn.isTcp(socket)
+        if (cli.daemonVersion != BuildConfig.VERSION_NAME || legacy) {
             cli.shutdown()
             val host = settings.adbHost.first()
             val port = settings.adbPort.first()
@@ -218,18 +224,16 @@ class DaemonManager(
             daemonVersion = cli.daemonVersion,
         )
         startWatchdog()
+        scope.launch { grantSelfSecureSettings() }
         cli
     }
 
     suspend fun requireClient(): DaemonClient {
         client?.let { if (it.isAlive) return it }
         reconnect()?.let { return it }
-        // No existing daemon — try respawning via the stored endpoint.
-        val host = settings.adbHost.first()
-        val port = settings.adbPort.first()
-        if (port > 0) {
-            connectAndSpawn(host, port).getOrNull()?.let { return it }
-        }
+        // No live daemon — respawn through whatever endpoint is up now
+        // (the wireless-debugging port moves on every toggle/reboot).
+        if (autoConnect() == AutoOutcome.Online) client?.let { return it }
         throw IllegalStateException("no shell daemon — pair and connect first")
     }
 
@@ -239,10 +243,14 @@ class DaemonManager(
      *   1. a live or previously spawned daemon,
      *   2. the endpoint that worked last time,
      *   3. plain adb on 127.0.0.1:5555 (emulator, `adb tcpip`, rooted),
-     *   4. wireless debugging's mDNS connect endpoint (already paired),
-     *   5. its pairing endpoint — returned for the user to finish,
-     *   6. manual entry.
-     * Does NOT take [lock] — each probe holds it via [connectAndSpawn].
+     *   4. wireless debugging switched back on if it went off (reboot,
+     *      Wi-Fi change) — possible once we hold WRITE_SECURE_SETTINGS,
+     *   5. wireless debugging's mDNS connect endpoint (already paired),
+     *   6. its pairing endpoint — returned for the user to finish,
+     *   7. manual entry.
+     * Silent: callers decide whether a [AutoOutcome.NeedsPair] /
+     * [AutoOutcome.Manual] result becomes UI. Does NOT take [lock] — each
+     * probe holds it via [connectAndSpawn].
      */
     suspend fun autoConnect(
         step: AutoStepSink = AutoStepSink { _, _ -> },
@@ -252,20 +260,27 @@ class DaemonManager(
 
         val host = settings.adbHost.first()
         val port = settings.adbPort.first()
-        if (port > 0 && probe(host, port, step)) return@withLock AutoOutcome.Online
+        val tried = mutableSetOf<String>()
+        suspend fun tryOnce(h: String, p: Int): Boolean =
+            tried.add("$h:$p") && probe(h, p, step)
 
-        if (host != "127.0.0.1" || port != 5555) {
-            if (probe("127.0.0.1", 5555, step)) return@withLock AutoOutcome.Online
-        }
+        if (port > 0 && tryOnce(host, port)) return@withLock AutoOutcome.Online
+        if (tryOnce(NsdHelper.LOOPBACK, 5555)) return@withLock AutoOutcome.Online
+
+        val wasOn = isWirelessDebuggingOn()
+        val justEnabled = !wasOn && enableWirelessDebugging()
+        if (justEnabled) step.onStep("enable_wd", "")
 
         step.onStep("scan", "")
-        findEndpoint(NsdHelper.TYPE_CONNECT, MDNS_SCAN_MS)?.let {
-            if (probe(it.host, it.port, step)) return@withLock AutoOutcome.Online
+        // A freshly enabled adbd takes a few seconds to announce itself.
+        val scanMs = if (justEnabled) MDNS_SCAN_MS * 3 else MDNS_SCAN_MS
+        findEndpoint(NsdHelper.TYPE_CONNECT, scanMs)?.let {
+            if (tryOnce(it.host, it.port)) return@withLock AutoOutcome.Online
         }
         findEndpoint(NsdHelper.TYPE_PAIRING, MDNS_PAIR_MS)?.let {
             return@withLock AutoOutcome.NeedsPair(it.host, it.port)
         }
-        AutoOutcome.Manual
+        AutoOutcome.Manual(wirelessOff = !isWirelessDebuggingOn())
     }
 
     /**
@@ -274,17 +289,18 @@ class DaemonManager(
      * is touched: the pairing port is not the connect port.
      */
     suspend fun connectAfterPair(step: AutoStepSink): AutoOutcome = autoMu.withLock {
-        repeat(3) {
+        repeat(4) {
             step.onStep("scan", "")
             findEndpoint(NsdHelper.TYPE_CONNECT, MDNS_SCAN_MS)?.let {
                 if (probe(it.host, it.port, step)) return@withLock AutoOutcome.Online
             }
             delay(800)
         }
-        AutoOutcome.Manual
+        AutoOutcome.Manual()
     }
 
-    /** First _adb-tls-* service that resolves, or null on timeout/failure. */
+    /** First _adb-tls-* service of THIS device that resolves (as a
+     *  127.0.0.1 endpoint), or null on timeout/failure. */
     suspend fun findEndpoint(type: String, timeoutMs: Long): AdbEndpoint? =
         runCatching {
             withTimeoutOrNull(timeoutMs) {
@@ -292,7 +308,56 @@ class DaemonManager(
                     it.port > 0 || it.serviceName.startsWith("discovery_failed")
                 }
             }?.takeIf { it.port > 0 }
+        }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
         }.getOrNull()
+
+    /** A daemon came up at least once — before that the silent ladder
+     *  (boot, health worker) has nothing to restore. */
+    fun everConnected(): Boolean = secrets.daemonToken.isNotEmpty()
+
+    /** Settings → Developer options → Wireless debugging. */
+    fun isWirelessDebuggingOn(): Boolean =
+        AndroidSettings.Global.getInt(context.contentResolver, ADB_WIFI_ENABLED, 0) == 1
+
+    private fun canWriteSecureSettings(): Boolean =
+        context.checkSelfPermission(WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * Wireless debugging turns itself off on reboot and whenever Wi-Fi
+     * drops — the main reason shell "doesn't come back". With
+     * WRITE_SECURE_SETTINGS (granted by our own daemon, Shizuku-style)
+     * flip it back on, but only while USB debugging is still enabled: if
+     * the user switched developer debugging off, that's a decision to
+     * respect. adbd itself refuses (and resets the flag) on Wi-Fi
+     * networks the user never allowed. True when it ends up on.
+     */
+    suspend fun enableWirelessDebugging(): Boolean {
+        if (isWirelessDebuggingOn()) return true
+        if (!canWriteSecureSettings()) return false
+        val cr = context.contentResolver
+        if (AndroidSettings.Global.getInt(cr, AndroidSettings.Global.ADB_ENABLED, 0) != 1) return false
+        val ok = runCatching { AndroidSettings.Global.putInt(cr, ADB_WIFI_ENABLED, 1) }
+            .getOrDefault(false)
+        if (!ok) return false
+        delay(1_500)
+        return isWirelessDebuggingOn()
+    }
+
+    /**
+     * Ask our shell daemon to grant WRITE_SECURE_SETTINGS to the app —
+     * a development permission shell may grant. It is what lets
+     * [enableWirelessDebugging] bring shell back after a reboot with no
+     * human in the loop. Best-effort, once per process.
+     */
+    private suspend fun grantSelfSecureSettings() {
+        if (secureGrantTried || canWriteSecureSettings()) return
+        secureGrantTried = true
+        runCatching {
+            client?.exec("pm grant ${context.packageName} $WRITE_SECURE_SETTINGS", 10_000)
+        }
+    }
+    @Volatile private var secureGrantTried = false
 
     /** One spawn attempt. The JNI op is hard-deadlined in Rust so it
      *  always returns and releases [lock]; the Kotlin-side timeout is a
@@ -318,10 +383,10 @@ class DaemonManager(
                         _status.value = DaemonStatus(ShellState.CONNECTING, detail = "key:daemon_lost")
                         c.close()
                         client = null
-                        reconnect() ?: run {
-                            val host = settings.adbHost.first()
-                            val port = settings.adbPort.first()
-                            if (port > 0) connectAndSpawn(host, port)
+                        // The stored port is stale after any wireless
+                        // debugging restart — climb the silent ladder.
+                        if (autoConnect() != AutoOutcome.Online) {
+                            _status.value = DaemonStatus(ShellState.OFFLINE, detail = "key:daemon_lost")
                         }
                     }
                 }.onFailure {
@@ -359,6 +424,9 @@ class DaemonManager(
         const val LOG_PATH = "/data/local/tmp/boxagentd.log"
         /** Above the Rust op deadline (25s) — a backstop, not the bound. */
         private const val PROBE_TIMEOUT_MS = 35_000L
+        /** Settings.Global.ADB_WIFI_ENABLED (hidden constant). */
+        private const val ADB_WIFI_ENABLED = "adb_wifi_enabled"
+        private const val WRITE_SECURE_SETTINGS = "android.permission.WRITE_SECURE_SETTINGS"
         private const val MDNS_SCAN_MS = 2_500L
         private const val MDNS_PAIR_MS = 1_500L
     }

@@ -62,6 +62,12 @@ fun OnboardingScreen(app: BoxAgentApp) {
     var busy by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
     var pairedOk by remember { mutableStateOf(false) }
+    val pairPhase by com.boxagent.app.daemon.PairingService.phase.collectAsState()
+    // The notification flow pairs (and usually connects) without this
+    // screen in the loop — follow the daemon status instead.
+    LaunchedEffect(st.detail, st.shell) {
+        if (st.detail == "key:paired_pending" || st.shell == ShellState.ONLINE) pairedOk = true
+    }
 
     // mDNS answers most of the form: the pairing endpoint is announced
     // by wireless debugging while its dialog is open — prefill host/port
@@ -115,6 +121,27 @@ fun OnboardingScreen(app: BoxAgentApp) {
                         )
                     },
                     content = {
+                        // Primary path: code typed into a notification while
+                        // the system pairing dialog stays open.
+                        PillButton(
+                            stringResource(R.string.pair_flow_start),
+                            enabled = pairPhase == null,
+                            onClick = {
+                                if (com.boxagent.app.daemon.PairingService.canRun(ctx)) {
+                                    com.boxagent.app.daemon.PairingService.start(ctx)
+                                } else {
+                                    note = ctx.getString(R.string.pair_flow_notif_off)
+                                }
+                            },
+                        )
+                        Text(
+                            stringResource(
+                                if (pairPhase != null) R.string.pair_flow_waiting
+                                else R.string.pair_split_hint,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Field(stringResource(R.string.host), host) { host = it }
                         Field(stringResource(R.string.pairing_port), pairPort) { pairPort = it }
                         Field(stringResource(R.string.pairing_code), pairCode) { pairCode = it }
@@ -122,6 +149,7 @@ fun OnboardingScreen(app: BoxAgentApp) {
                     action = {
                         PillButton(
                             stringResource(if (busy) R.string.pairing else R.string.pair),
+                            filled = false,
                             enabled = !busy && pairPort.isNotEmpty() && pairCode.isNotEmpty(),
                             onClick = {
                                 busy = true
@@ -254,11 +282,7 @@ fun OnboardingScreen(app: BoxAgentApp) {
         if (pager.currentPage == 1 && st.shell != ShellState.ONLINE && !busy) {
             busy = true
             val sink = com.boxagent.app.daemon.AutoStepSink { k, arg ->
-                note = when (k) {
-                    "try" -> ctx.getString(R.string.auto_step_try, arg)
-                    "scan" -> ctx.getString(R.string.auto_step_scan)
-                    else -> ctx.getString(R.string.auto_step_reconnect)
-                }
+                note = autoStepText(ctx, k, arg)
             }
             val out = if (pairedOk) app.daemon.connectAfterPair(sink)
             else app.daemon.autoConnect(sink)
@@ -269,8 +293,10 @@ fun OnboardingScreen(app: BoxAgentApp) {
                     note = ctx.getString(R.string.pair_needed)
                     pager.animateScrollToPage(0)
                 }
-                AutoOutcome.Manual -> {
-                    note = ctx.getString(R.string.auto_none)
+                is AutoOutcome.Manual -> {
+                    note = ctx.getString(
+                        if (out.wirelessOff) R.string.auto_wireless_off else R.string.auto_none,
+                    )
                     app.daemon.findEndpoint(NsdHelper.TYPE_CONNECT, 1_500)?.let {
                         if (connectPort.isEmpty()) {
                             host = it.host

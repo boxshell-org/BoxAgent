@@ -1,7 +1,5 @@
 package com.boxagent.app.daemon
 
-import android.net.LocalSocket
-import android.net.LocalSocketAddress
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -26,12 +24,12 @@ data class ExecResult(
 class DaemonError(message: String) : IOException(message)
 
 /**
- * Client for `boxagentd`: abstract-namespace LocalSocket, length-prefixed
+ * Client for `boxagentd`: loopback TCP (see [HelperConn]), length-prefixed
  * JSON frames (mirrors boxagent-proto). One request in flight per
  * connection — the LLM drives calls sequentially anyway.
  */
 class DaemonClient private constructor(
-    private val socket: LocalSocket,
+    private val socket: HelperConn,
     private val input: DataInputStream,
     private val output: DataOutputStream,
 ) {
@@ -41,8 +39,8 @@ class DaemonClient private constructor(
     /** Set once the socket is closed or framing can no longer be trusted. */
     @Volatile private var broken = false
 
-    // LocalSocket.isConnected stays true after close() or a dead peer, so
-    // liveness is tracked here: any transport/framing failure poisons it.
+    // isConnected stays true after close() or a dead peer, so liveness is
+    // tracked here: any transport/framing failure poisons it.
     val isAlive: Boolean get() = !broken && socket.isConnected
 
     /** Daemon build version, reported in the auth_ok frame ("" on old daemons). */
@@ -54,13 +52,13 @@ class DaemonClient private constructor(
         io.withLock {
             try {
                 // Half-dead daemons accept writes but never reply — bound the read.
-                socket.soTimeout = 10_000
+                socket.timeoutMs = 10_000
                 send(JSONObject().put("type", "ping"))
                 val alive = recv().optString("type") == "pong"
-                socket.soTimeout = 0
+                socket.timeoutMs = 0
                 alive
             } catch (e: kotlinx.coroutines.CancellationException) {
-                socket.soTimeout = 0
+                runCatching { socket.timeoutMs = 0 }
                 throw e
             } catch (e: Exception) {
                 // A timed-out read may have consumed half a frame.
@@ -233,29 +231,38 @@ class DaemonClient private constructor(
         const val MAX_FRAME = 16 * 1024 * 1024
         const val MAX_EXEC_OUTPUT = 1024 * 1024
 
-        /** Connect + authenticate; returns null on any failure. */
-        suspend fun connect(socketName: String, token: String): DaemonClient? =
+        /** Connect + authenticate to `tcp:<port>` (or a legacy abstract
+         *  name); null on any failure, with the reason in [lastError]. */
+        suspend fun connect(endpoint: String, token: String): DaemonClient? =
             withContext(Dispatchers.IO) {
+                var socket: HelperConn? = null
                 runCatching {
-                    val socket = LocalSocket()
-                    socket.connect(LocalSocketAddress(socketName, LocalSocketAddress.Namespace.ABSTRACT))
-                    socket.soTimeout = 15_000
-                    val input = DataInputStream(socket.inputStream)
-                    val output = DataOutputStream(socket.outputStream)
-                    val client = DaemonClient(socket, input, output)
+                    val s = HelperConn.open(endpoint).also { socket = it }
+                    s.timeoutMs = 15_000
+                    val client = DaemonClient(
+                        s, DataInputStream(s.input.buffered()), DataOutputStream(s.output.buffered()),
+                    )
                     client.send(JSONObject().put("type", "auth").put("token", token))
                     val f = client.recv()
                     if (f.optString("type") == "auth_ok") {
                         client.daemonVersion = f.optString("version")
-                        socket.soTimeout = 0
+                        s.timeoutMs = 0
+                        lastError = null
                         client
                     } else {
-                        socket.close(); null
+                        throw IOException(f.optString("message").ifEmpty { "auth rejected" })
                     }
                 }.onFailure {
+                    socket?.close()
                     // runCatching swallows CancellationException — don't.
                     if (it is kotlinx.coroutines.CancellationException) throw it
+                    lastError = it.message ?: it.javaClass.simpleName
                 }.getOrNull()
             }
+
+        /** Why the last [connect] failed — surfaced when a spawn "worked"
+         *  but nothing answers (e.g. "Connection refused"). */
+        @Volatile var lastError: String? = null
+            private set
     }
 }

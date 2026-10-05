@@ -93,23 +93,34 @@ fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Push `daemon` bytes to the device and spawn it detached.
-/// Returns the shell output of the spawn command for diagnostics.
+/// Daemon listen flag for an app-side endpoint: `tcp:<port>` → loopback
+/// TCP (what the app uses — SELinux lets apps reach it), anything else is
+/// a legacy abstract socket name.
+fn listen_flag(listen: &str) -> String {
+    match listen.strip_prefix("tcp:") {
+        Some(port) => format!("--port {}", sq(port)),
+        None => format!("--socket {}", sq(listen)),
+    }
+}
+
+/// Push `daemon` bytes to the device and spawn it detached, listening on
+/// `listen` (see [`listen_flag`]). Returns the shell output of the spawn
+/// command for diagnostics.
 pub fn spawn_daemon(
     pem: &str,
     addr: SocketAddr,
     daemon_bytes: &[u8],
     remote_path: &str,
-    socket_name: &str,
+    listen: &str,
     token: &str,
 ) -> Result<String, AdbOpsError> {
     let pem = pem.to_owned();
     let bytes = daemon_bytes.to_vec();
     let remote_path = remote_path.to_owned();
-    let socket_name = socket_name.to_owned();
+    let listen = listen.to_owned();
     let token = token.to_owned();
     run_deadlined(SPAWN_DEADLINE, "spawn daemon", move || {
-        spawn_daemon_inner(&pem, addr, &bytes, &remote_path, &socket_name, &token)
+        spawn_daemon_inner(&pem, addr, &bytes, &remote_path, &listen, &token)
     })
 }
 
@@ -118,7 +129,7 @@ fn spawn_daemon_inner(
     addr: SocketAddr,
     daemon_bytes: &[u8],
     remote_path: &str,
-    socket_name: &str,
+    listen: &str,
     token: &str,
 ) -> Result<String, AdbOpsError> {
     let (mut dev, _key) = device(pem, addr)?;
@@ -137,10 +148,10 @@ fn spawn_daemon_inner(
     // disposition survives fork+exec, so the daemon is immune from birth.
     let spawn = format!(
         "trap '' HUP; pkill -x boxagentd; chmod 755 {p} && \
-         (setsid {p} --socket {s} --token {t} \
+         (setsid {p} {l} --token {t} \
          </dev/null >/data/local/tmp/boxagentd.log 2>&1 &)",
         p = sq(remote_path),
-        s = sq(socket_name),
+        l = listen_flag(listen),
         t = sq(token)
     );
     let mut out = Vec::new();
@@ -195,6 +206,12 @@ mod tests {
         assert_ne!(k2.0, p, "concurrent ops need distinct files");
         drop(k);
         assert!(!p.exists());
+    }
+
+    #[test]
+    fn listen_flag_picks_tcp_or_abstract() {
+        assert_eq!(listen_flag("tcp:41234"), "--port '41234'");
+        assert_eq!(listen_flag("boxagentd.1f"), "--socket 'boxagentd.1f'");
     }
 
     #[test]

@@ -56,6 +56,27 @@ fn cfg_str(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().trim().to_string()
 }
 
+/// `host:port` from the UI or mDNS. Plain `format!("{host}:{port}")` breaks
+/// on IPv6 literals (needs brackets) and zone ids (`fe80::1%wlan0`), which
+/// NsdManager hands out — go through getaddrinfo for anything that isn't a
+/// bare IP.
+fn sock_addr(host: &str, port: jint) -> Result<SocketAddr, String> {
+    use std::net::{IpAddr, ToSocketAddrs};
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let port = u16::try_from(port)
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| format!("bad port {port}"))?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("bad addr {host}:{port}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("bad addr {host}:{port}"))
+}
+
 // ------------------------------------------------------------------ keys
 
 #[no_mangle]
@@ -99,9 +120,9 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativePair(
     let code = get_string(&mut env, &code);
     let pem = get_string(&mut env, &pem);
     let out = guarded(|| {
-        let addr: SocketAddr = match format!("{host}:{port}").parse() {
+        let addr = match sock_addr(&host, port) {
             Ok(a) => a,
-            Err(e) => return err(format!("bad addr {host}:{port}: {e}")),
+            Err(e) => return err(e),
         };
         match adb_tls::pair(addr, &code, &pem) {
             Ok(r) => ok(json!({
@@ -124,14 +145,14 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeSpawnDaemon(
     port: jint,
     daemon_b64: JString,
     remote_path: JString,
-    socket: JString,
+    listen: JString,
     token: JString,
 ) -> jstring {
     let pem = get_string(&mut env, &pem);
     let host = get_string(&mut env, &host);
     let daemon_b64 = get_string(&mut env, &daemon_b64);
     let remote_path = get_string(&mut env, &remote_path);
-    let socket = get_string(&mut env, &socket);
+    let listen = get_string(&mut env, &listen);
     let token = get_string(&mut env, &token);
     let out = guarded(|| {
         use base64::Engine;
@@ -139,11 +160,11 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeSpawnDaemon(
             Ok(b) => b,
             Err(e) => return err(format!("b64: {e}")),
         };
-        let addr: SocketAddr = match format!("{host}:{port}").parse() {
+        let addr = match sock_addr(&host, port) {
             Ok(a) => a,
-            Err(e) => return err(format!("bad addr: {e}")),
+            Err(e) => return err(e),
         };
-        match adb_ops::spawn_daemon(&pem, addr, &bytes, &remote_path, &socket, &token) {
+        match adb_ops::spawn_daemon(&pem, addr, &bytes, &remote_path, &listen, &token) {
             Ok(out) => ok(json!({"output": out})),
             Err(e) => err(e),
         }
@@ -164,9 +185,9 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeAdbShell(
     let host = get_string(&mut env, &host);
     let cmd = get_string(&mut env, &cmd);
     let out = guarded(|| {
-        let addr: SocketAddr = match format!("{host}:{port}").parse() {
+        let addr = match sock_addr(&host, port) {
             Ok(a) => a,
-            Err(e) => return err(format!("bad addr: {e}")),
+            Err(e) => return err(e),
         };
         match adb_ops::adb_shell(&pem, addr, &cmd) {
             Ok(out) => ok(json!({"output": out})),
@@ -468,5 +489,28 @@ pub extern "system" fn Java_com_boxagent_app_bridge_Core_nativeCancel(
         .and_then(|m| m.get(&(id as u64)).cloned())
     {
         flag.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sock_addr;
+
+    #[test]
+    fn sock_addr_accepts_v4_v6_and_brackets() {
+        assert_eq!(
+            sock_addr("127.0.0.1", 5555).unwrap().to_string(),
+            "127.0.0.1:5555"
+        );
+        assert_eq!(
+            sock_addr(" ::1 ", 37001).unwrap().to_string(),
+            "[::1]:37001"
+        );
+        assert_eq!(
+            sock_addr("[::1]", 37001).unwrap().to_string(),
+            "[::1]:37001"
+        );
+        assert!(sock_addr("127.0.0.1", 0).is_err());
+        assert!(sock_addr("127.0.0.1", 70000).is_err());
     }
 }

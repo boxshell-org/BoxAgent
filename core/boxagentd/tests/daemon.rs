@@ -1,18 +1,21 @@
-//! Host integration test: spawn the real daemon binary and drive it over its
-//! abstract socket exactly like the app's DaemonClient does.
+//! Host integration test: spawn the real daemon binary and drive it over
+//! loopback TCP exactly like the app's DaemonClient does (plus the legacy
+//! abstract socket older app builds used).
 
 use base64::Engine;
 use boxagent_proto::{read_frame, write_frame, Request, Response};
 use std::os::linux::net::SocketAddrExt;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpStream, UnixStream};
 
 const TOKEN: &str = "test-token";
 
 struct Daemon {
     child: Child,
     name: String,
+    port: u16,
 }
 
 impl Drop for Daemon {
@@ -22,13 +25,30 @@ impl Drop for Daemon {
     }
 }
 
+/// A port the kernel just handed out — free unless something races us.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 fn spawn() -> Daemon {
     let name = format!("boxagentd.test.{}.{}", std::process::id(), rand_suffix());
+    let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_boxagentd"))
-        .args(["--socket", &name, "--token", TOKEN])
+        .args([
+            "--port",
+            &port.to_string(),
+            "--socket",
+            &name,
+            "--token",
+            TOKEN,
+        ])
         .spawn()
         .expect("spawn daemon");
-    Daemon { child, name }
+    Daemon { child, name, port }
 }
 
 fn rand_suffix() -> u128 {
@@ -38,35 +58,49 @@ fn rand_suffix() -> u128 {
         .as_nanos()
 }
 
-async fn connect(d: &Daemon, token: &str) -> (UnixStream, Response) {
-    let addr = std::os::unix::net::SocketAddr::from_abstract_name(d.name.as_bytes()).unwrap();
+async fn retry<T>(mut f: impl FnMut() -> std::io::Result<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let std_stream = loop {
-        match std::os::unix::net::UnixStream::connect_addr(&addr) {
-            Ok(s) => break s,
+    loop {
+        match f() {
+            Ok(s) => return s,
             Err(e) if Instant::now() < deadline => {
                 let _ = e;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             Err(e) => panic!("connect: {e}"),
         }
-    };
-    std_stream.set_nonblocking(true).unwrap();
-    let mut s = UnixStream::from_std(std_stream).unwrap();
+    }
+}
+
+async fn tcp(d: &Daemon) -> TcpStream {
+    let port = d.port;
+    let s = retry(|| std::net::TcpStream::connect(("127.0.0.1", port))).await;
+    s.set_nonblocking(true).unwrap();
+    TcpStream::from_std(s).unwrap()
+}
+
+async fn abstract_sock(d: &Daemon) -> UnixStream {
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(d.name.as_bytes()).unwrap();
+    let s = retry(|| std::os::unix::net::UnixStream::connect_addr(&addr)).await;
+    s.set_nonblocking(true).unwrap();
+    UnixStream::from_std(s).unwrap()
+}
+
+async fn auth<S: AsyncRead + AsyncWrite + Unpin>(s: &mut S, token: &str) -> Response {
     write_frame(
-        &mut s,
+        s,
         &Request::Auth {
             token: token.into(),
         },
     )
     .await
     .unwrap();
-    let r: Response = read_frame(&mut s).await.unwrap();
-    (s, r)
+    read_frame(s).await.unwrap()
 }
 
-async fn authed(d: &Daemon) -> UnixStream {
-    let (s, r) = connect(d, TOKEN).await;
+async fn authed(d: &Daemon) -> TcpStream {
+    let mut s = tcp(d).await;
+    let r = auth(&mut s, TOKEN).await;
     assert!(matches!(r, Response::AuthOk { .. }), "{r:?}");
     s
 }
@@ -78,7 +112,12 @@ struct ExecOut {
     timed_out: bool,
 }
 
-async fn exec(s: &mut UnixStream, id: u64, cmd: &str, timeout_ms: u64) -> ExecOut {
+async fn exec<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    id: u64,
+    cmd: &str,
+    timeout_ms: u64,
+) -> ExecOut {
     write_frame(
         s,
         &Request::Exec {
@@ -130,8 +169,50 @@ async fn exec(s: &mut UnixStream, id: u64, cmd: &str, timeout_ms: u64) -> ExecOu
 #[tokio::test]
 async fn rejects_bad_token() {
     let d = spawn();
-    let (_s, r) = connect(&d, "wrong").await;
+    let mut s = tcp(&d).await;
+    let r = auth(&mut s, "wrong").await;
     assert!(matches!(r, Response::Err { .. }), "{r:?}");
+}
+
+#[tokio::test]
+async fn legacy_abstract_socket_still_serves() {
+    let d = spawn();
+    let mut s = abstract_sock(&d).await;
+    let r = auth(&mut s, TOKEN).await;
+    assert!(matches!(r, Response::AuthOk { .. }), "{r:?}");
+    let o = exec(&mut s, 1, "echo hi", 5000).await;
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "hi\n");
+}
+
+#[tokio::test]
+async fn silent_peer_is_dropped_after_auth_timeout() {
+    use tokio::io::AsyncReadExt;
+    let d = spawn();
+    let mut s = tcp(&d).await;
+    // Never send the token: the daemon must hang up on its own.
+    let mut buf = [0u8; 1];
+    let r = tokio::time::timeout(Duration::from_secs(8), s.read(&mut buf)).await;
+    assert!(matches!(r, Ok(Ok(0)) | Ok(Err(_))), "{r:?}");
+}
+
+#[tokio::test]
+async fn loopback_only() {
+    let d = spawn();
+    let _ = authed(&d).await; // up
+                              // Any non-loopback local address must refuse.
+    let ext = std::net::UdpSocket::bind("0.0.0.0:0").and_then(|u| {
+        u.connect("192.0.2.1:9")?;
+        u.local_addr()
+    });
+    if let Ok(a) = ext {
+        if !a.ip().is_loopback() && !a.ip().is_unspecified() {
+            let r = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::new(a.ip(), d.port),
+                Duration::from_secs(2),
+            );
+            assert!(r.is_err(), "daemon reachable on {}", a.ip());
+        }
+    }
 }
 
 #[tokio::test]

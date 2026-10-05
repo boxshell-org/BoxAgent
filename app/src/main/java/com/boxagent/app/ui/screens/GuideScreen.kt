@@ -78,6 +78,8 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
     var pairHost by remember { mutableStateOf("127.0.0.1") }
     var pairPort by remember { mutableStateOf("") }
     var connectHint by remember { mutableStateOf<String?>(null) }
+    var showFlow by remember { mutableStateOf(false) }
+    var flowHint by remember { mutableStateOf<String?>(null) }
 
     /** Same ladder as the Status tab — auto first, humans only for the
      *  pairing code or when discovery comes up empty. */
@@ -85,11 +87,7 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
         autoStep = ctx.getString(R.string.auto_step_reconnect)
         autoJob = scope.launch {
             val sink = com.boxagent.app.daemon.AutoStepSink { k, arg ->
-                autoStep = when (k) {
-                    "try" -> ctx.getString(R.string.auto_step_try, arg)
-                    "scan" -> ctx.getString(R.string.auto_step_scan)
-                    else -> ctx.getString(R.string.auto_step_reconnect)
-                }
+                autoStep = autoStepText(ctx, k, arg)
             }
             val out = if (afterPair) app.daemon.connectAfterPair(sink)
             else app.daemon.autoConnect(sink)
@@ -101,9 +99,11 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
                     pairPort = out.port.toString()
                     showPair = true
                 }
-                AutoOutcome.Manual -> {
-                    connectHint = ctx.getString(R.string.auto_none)
-                    showConnect = true
+                is AutoOutcome.Manual -> {
+                    flowHint = ctx.getString(
+                        if (out.wirelessOff) R.string.auto_wireless_off else R.string.auto_none,
+                    )
+                    showFlow = true
                 }
             }
         }
@@ -181,7 +181,8 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
                 )
             }
             PillButton(stringResource(R.string.pair), filled = false, onClick = {
-                showPair = true
+                flowHint = null
+                showFlow = true
             })
             PillButton(stringResource(R.string.open_dev_settings), filled = false, onClick = {
                 ctx.startActivity(
@@ -233,15 +234,29 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
         }
     }
 
+    if (showFlow) {
+        PairFlowDialog(
+            hint = flowHint,
+            onManualCode = { showFlow = false; showPair = true },
+            onManualConnect = { showFlow = false; connectHint = null; showConnect = true },
+            onDismiss = { showFlow = false },
+        )
+    }
     if (showPair) {
         PairDialog(
             initialHost = pairHost,
             initialPort = pairPort,
             onPair = { host, port, code ->
                 scope.launch {
-                    val r = app.daemon.pair(host, port.toIntOrNull() ?: 0, code)
+                    val r = app.daemon.pair(
+                        host.trim(), port.trim().toIntOrNull() ?: 0, code.filter { it.isDigit() },
+                    )
                     showPair = false
-                    if (r.isSuccess) runLadder(afterPair = true) else showConnect = true
+                    if (r.isSuccess) runLadder(afterPair = true)
+                    else {
+                        flowHint = r.exceptionOrNull()?.message
+                        showFlow = true
+                    }
                 }
             },
             onDismiss = { showPair = false },
@@ -252,7 +267,7 @@ fun PermissionsGuideScreen(app: BoxAgentApp, onBack: () -> Unit) {
             hint = connectHint,
             onConnect = { host, port ->
                 scope.launch {
-                    app.daemon.connectAndSpawn(host, port.toIntOrNull() ?: 0)
+                    app.daemon.connectAndSpawn(host.trim(), port.trim().toIntOrNull() ?: 0)
                     showConnect = false
                 }
             },

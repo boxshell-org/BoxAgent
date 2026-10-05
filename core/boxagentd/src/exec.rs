@@ -5,8 +5,7 @@ use base64::Engine;
 use boxagent_proto::{write_frame, Response};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, WriteHalf};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncReadExt, AsyncWrite};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
@@ -95,11 +94,11 @@ async fn wait_child(child: &mut Child, pg: &mut PgKill, timeout: Duration) -> (O
     }
 }
 
-pub async fn run(
+pub async fn run<W: AsyncWrite + Unpin>(
     id: u64,
     cmd: &str,
     timeout_ms: u64,
-    wr: &mut WriteHalf<UnixStream>,
+    wr: &mut W,
 ) -> Result<()> {
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.max(500));
@@ -176,7 +175,7 @@ pub async fn run(
 }
 
 /// `screencap -p` under shell uid captures the primary display.
-pub async fn screencap(id: u64, wr: &mut WriteHalf<UnixStream>) -> Result<()> {
+pub async fn screencap<W: AsyncWrite + Unpin>(id: u64, wr: &mut W) -> Result<()> {
     use base64::Engine;
     let out = tokio::time::timeout(SCREENCAP_TIMEOUT, sh("screencap -p").output()).await;
 

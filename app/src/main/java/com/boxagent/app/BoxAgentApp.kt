@@ -4,6 +4,7 @@ import android.app.Application
 import com.boxagent.app.agent.AgentController
 import com.boxagent.app.agent.Notifier
 import com.boxagent.app.agent.ToolRunner
+import com.boxagent.app.daemon.AutoOutcome
 import com.boxagent.app.daemon.DaemonManager
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.data.Secrets
@@ -19,6 +20,7 @@ import com.boxagent.app.work.HealthWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -84,15 +86,12 @@ class BoxAgentApp : Application() {
         }
     }
 
-    /** Called from HealthWorker + BootReceiver. */
+    /** Called from HealthWorker: bring shell back without a human when
+     *  possible (silent ladder — never prompts for pairing). */
     suspend fun healthCheck() {
         val st = daemon.status.value
-        if (st.shell == ShellState.ONLINE) {
-            val alive = daemon.client?.ping() == true
-            if (!alive) daemon.reconnect()
-        } else {
-            daemon.reconnect()
-        }
+        val alive = st.shell == ShellState.ONLINE && daemon.client?.ping() == true
+        if (!alive && daemon.everConnected()) daemon.autoConnect()
         // Logging the check is best-effort — a Room hiccup shouldn't make
         // the worker report failure and retry.
         runCatching {
@@ -102,32 +101,49 @@ class BoxAgentApp : Application() {
         }
     }
 
+    /** BootReceiver: the receiver only gets seconds, Wi-Fi (and so
+     *  wireless debugging) tens of seconds — hold the process with the
+     *  foreground service while the restore runs, then release it. */
     fun onBootRestore(done: () -> Unit = {}) {
-        appScope.launch {
-            try {
-                restoreAfterBoot()
-            } finally {
-                done()
-            }
+        if (!daemon.everConnected()) {
+            done()
+            return
         }
+        AgentService.start(this, getString(R.string.notif_restoring_boot), wake = false)
+        done()
+        appScope.launch { restoreAfterBoot() }
     }
 
     private suspend fun restoreAfterBoot() {
-        val had = daemon.reconnect() != null
-        if (had) {
+        // Daemons die with the reboot; wireless debugging is off until we
+        // (with WRITE_SECURE_SETTINGS) or the user turn it back on, and
+        // needs Wi-Fi up first. Retry over ~2 minutes.
+        var online = false
+        for (attempt in 0 until BOOT_ATTEMPTS) {
+            if (daemon.autoConnect() == AutoOutcome.Online) {
+                online = true
+                break
+            }
+            delay(BOOT_RETRY_MS)
+        }
+        if (online) {
             AgentService.start(
                 this@BoxAgentApp,
                 getString(R.string.notif_restored_boot),
                 wake = false,
             )
         } else {
-            // Wireless debugging resets on reboot on many devices —
-            // surface a repair prompt rather than silently failing.
+            AgentService.stop(this@BoxAgentApp)
             Notifier.post(
                 this@BoxAgentApp,
                 getString(R.string.notif_attention_title),
                 getString(R.string.notif_attention_body),
             )
         }
+    }
+
+    private companion object {
+        const val BOOT_ATTEMPTS = 8
+        const val BOOT_RETRY_MS = 15_000L
     }
 }

@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import com.boxagent.app.BoxAgentApp
 import com.boxagent.app.R
 import com.boxagent.app.daemon.AutoOutcome
+import com.boxagent.app.daemon.PairingService
 import com.boxagent.app.daemon.ShellState
 import com.boxagent.app.service.A11yService
 import com.boxagent.app.ui.components.BwCard
@@ -74,23 +75,22 @@ fun StatusScreen(app: BoxAgentApp) {
     var pairHost by remember { mutableStateOf("127.0.0.1") }
     var pairPort by remember { mutableStateOf("") }
     var connectHint by remember { mutableStateOf<String?>(null) }
+    var showFlow by remember { mutableStateOf(false) }
+    var flowHint by remember { mutableStateOf<String?>(null) }
+    val pairPhase by PairingService.phase.collectAsState()
     var showGuide by remember { mutableStateOf(false) }
     var showLogs by remember { mutableStateOf(false) }
     var probe by remember { mutableStateOf<String?>(null) }
 
     /** Shared ladder runner: drives the auto dialog and routes its
-     *  outcome — online → done, needs-pair → prefilled pair dialog,
-     *  nothing found → manual entry. */
+     *  outcome — online → done, needs-pair (dialog open right now) →
+     *  prefilled pair form, nothing found → the pairing flow. */
     fun runLadder(afterPair: Boolean) {
         showAuto = true
         autoStep = ctx.getString(R.string.auto_step_reconnect)
         autoJob = scope.launch {
             val sink = com.boxagent.app.daemon.AutoStepSink { k, arg ->
-                autoStep = when (k) {
-                    "try" -> ctx.getString(R.string.auto_step_try, arg)
-                    "scan" -> ctx.getString(R.string.auto_step_scan)
-                    else -> ctx.getString(R.string.auto_step_reconnect)
-                }
+                autoStep = autoStepText(ctx, k, arg)
             }
             val out = if (afterPair) app.daemon.connectAfterPair(sink)
             else app.daemon.autoConnect(sink)
@@ -102,9 +102,11 @@ fun StatusScreen(app: BoxAgentApp) {
                     pairPort = out.port.toString()
                     showPair = true
                 }
-                AutoOutcome.Manual -> {
-                    connectHint = ctx.getString(R.string.auto_none)
-                    showConnect = true
+                is AutoOutcome.Manual -> {
+                    flowHint = ctx.getString(
+                        if (out.wirelessOff) R.string.auto_wireless_off else R.string.auto_none,
+                    )
+                    showFlow = true
                 }
             }
         }
@@ -165,7 +167,7 @@ fun StatusScreen(app: BoxAgentApp) {
             ListRow(stringResource(R.string.reconnect), icon = Icons.Rounded.Sync, divider = true,
                 onClick = { scope.launch { app.daemon.reconnect() } })
             ListRow(stringResource(R.string.re_pair), icon = Icons.Rounded.Link, divider = true,
-                onClick = { showPair = true })
+                onClick = { flowHint = null; showFlow = true })
             ListRow(stringResource(R.string.connect), icon = Icons.Rounded.PlayArrow, divider = true,
                 onClick = { if (autoJob?.isActive != true) runLadder(afterPair = false) })
             ListRow(stringResource(R.string.enable_a11y), icon = Icons.Rounded.Accessibility, divider = true,
@@ -202,6 +204,13 @@ fun StatusScreen(app: BoxAgentApp) {
             ) { Chevron() }
         }
 
+        if (pairPhase != null) {
+            Text(
+                stringResource(R.string.pair_flow_waiting),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         st.detail.takeIf { it.isNotEmpty() }?.let {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 SectionLabel(stringResource(R.string.detail))
@@ -241,6 +250,14 @@ fun StatusScreen(app: BoxAgentApp) {
                     showAuto = false
                 })
             },
+        )
+    }
+    if (showFlow) {
+        PairFlowDialog(
+            hint = flowHint,
+            onManualCode = { showFlow = false; showPair = true },
+            onManualConnect = { showFlow = false; connectHint = null; showConnect = true },
+            onDismiss = { showFlow = false },
         )
     }
     if (showPair) {
@@ -312,11 +329,13 @@ fun PairDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Text(
+                    stringResource(R.string.pair_split_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 PillButton(stringResource(R.string.open_wireless_debugging), filled = false, onClick = {
-                    ctx.startActivity(
-                        Intent(AndroidSettings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
+                    runCatching { ctx.startActivity(PairingService.wirelessDebuggingIntent()) }
                 })
                 TextField(value = host, onValueChange = { host = it }, label = { Text(stringResource(R.string.host)) }, colors = bwTextFieldColors())
                 TextField(value = port, onValueChange = { port = it }, label = { Text(stringResource(R.string.port)) }, colors = bwTextFieldColors())
@@ -329,6 +348,65 @@ fun PairDialog(
         },
         dismissButton = { PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss) },
     )
+}
+
+/**
+ * The pairing flow that works on stock Android: the code is typed into a
+ * BoxAgent notification while Settings' pairing dialog stays open (it
+ * closes — and the code dies — when you switch apps). Manual forms stay
+ * one tap away for when notifications are off.
+ */
+@Composable
+fun PairFlowDialog(
+    hint: String? = null,
+    onManualCode: () -> Unit,
+    onManualConnect: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val ctx = LocalContext.current
+    val canNotify = remember { PairingService.canRun(ctx) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.pair_flow_title), style = MaterialTheme.typography.titleMedium) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                hint?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+                Text(
+                    stringResource(R.string.pair_flow_body),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!canNotify) {
+                    Text(
+                        stringResource(R.string.pair_flow_notif_off),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                // Stacked: side by side they wrap mid-word on narrow phones.
+                PillButton(stringResource(R.string.pair_flow_manual), filled = false, onClick = onManualCode)
+                PillButton(stringResource(R.string.connect_port), filled = false, onClick = onManualConnect)
+            }
+        },
+        confirmButton = {
+            PillButton(stringResource(R.string.pair_flow_start), enabled = canNotify, onClick = {
+                PairingService.start(ctx)
+                onDismiss()
+            })
+        },
+        dismissButton = { PillButton(stringResource(R.string.cancel), filled = false, onClick = onDismiss) },
+    )
+}
+
+/** Localized text for an [com.boxagent.app.daemon.AutoStepSink] rung. */
+fun autoStepText(ctx: android.content.Context, key: String, arg: String): String = when (key) {
+    "try" -> ctx.getString(R.string.auto_step_try, arg)
+    "scan" -> ctx.getString(R.string.auto_step_scan)
+    "enable_wd" -> ctx.getString(R.string.auto_step_enable_wd)
+    else -> ctx.getString(R.string.auto_step_reconnect)
 }
 
 @Composable
@@ -377,6 +455,7 @@ private fun daemonDetail(detail: String): String {
         "daemon_upgrade" -> R.string.d_daemon_upgrade
         "pair_failed" -> R.string.d_pair_failed
         "spawn_failed" -> R.string.d_spawn_failed
+        "wd_enabling" -> R.string.d_wd_enabling
         else -> return detail
     }
     return stringResource(res)
