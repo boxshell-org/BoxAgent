@@ -447,8 +447,8 @@ fun SettingsScreen(app: BoxAgentApp) {
                                     hStr.toIntOrNull() ?: 0,
                                     dpiStr.toIntOrNull() ?: 0,
                                 )
-                                // Recreate so the new geometry takes effect.
-                                app.vscreen.release()
+                                // The host resizes the live display in place —
+                                // the agent's open apps survive.
                                 app.vscreen.ready()
                             }
                         })

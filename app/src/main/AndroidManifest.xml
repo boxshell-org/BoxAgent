@@ -16,6 +16,12 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Never requested from the user: our own shell daemon grants it
+         (`pm grant`, a development permission) so BoxAgent can switch
+         wireless debugging back on after a reboot or Wi-Fi change. -->
+    <uses-permission
+        android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
     <!-- Normal permission for the clock intents used by the set-alarm /
          set-timer skills (the clock app still shows them to the user). -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
@@ -41,6 +47,18 @@
             </intent-filter>
         </activity>
 
+        <!-- Virtual-screen backdrop. Exported because shell starts it on
+             the virtual display (am start with a display id); separate
+             affinity so it never pulls the main task over there. -->
+        <activity
+            android:name=".vscreen.VScreenHomeActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:taskAffinity="com.boxagent.app.vscreen"
+            android:theme="@style/Theme.BoxAgent" />
+
         <service
             android:name=".service.AgentService"
             android:exported="false"
@@ -49,6 +67,17 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="On-device LLM agent runtime: keeps the tool executor, \
 daemon watchdog and in-flight tasks alive while the app is backgrounded." />
+        </service>
+
+        <service
+            android:name=".daemon.PairingService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Wireless-debugging pairing: watches for the system pairing \
+dialog and takes the pairing code from an inline-reply notification while that \
+dialog stays open." />
         </service>
 
         <service

@@ -3,7 +3,9 @@ package com.boxagent.app.vscreen
 import android.content.Context
 import android.util.DisplayMetrics
 import android.view.Display
+import com.boxagent.app.daemon.DaemonClient
 import com.boxagent.app.daemon.DaemonManager
+import com.boxagent.app.daemon.HelperConn
 import com.boxagent.app.data.Secrets
 import com.boxagent.app.data.Settings
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,12 @@ data class VScreenStatus(
     val w: Int = 0,
     val h: Int = 0,
     val dpi: Int = 0,
+    /** Trusted display: gets its own focus (14+), so the agent's keys
+     *  and text never steal focus/IME from the user's screen. */
+    val ownFocus: Boolean = false,
+    /** Soft keyboard suppressed on the display (text goes in via a11y)
+     *  instead of popping up on the physical screen. */
+    val imeHidden: Boolean = false,
     val detail: String = "",
 )
 
@@ -45,6 +53,9 @@ interface TouchBackend {
     suspend fun hold(x: Float, y: Float, durationMs: Long): Boolean
     suspend fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean
     suspend fun pinch(cx: Float, cy: Float, zoomIn: Boolean, percent: Int): Boolean
+    suspend fun drag(
+        x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long, holdMs: Long,
+    ): Boolean
 }
 
 /**
@@ -96,10 +107,21 @@ class VScreenManager(
         }
     }
 
-    /** Ensures host + display exist; throws with a readable reason. */
+    /** Ensures host + display exist (at the configured geometry); throws
+     *  with a readable reason. */
     private suspend fun ensureClient(): VScreenClient = lock.withLock {
-        client?.takeIf { it.isAlive && displayId >= 0 }
-            ?.let { if (it.ping()) return it }
+        val (w, h, dpi) = wantedSize()
+        client?.takeIf { it.isAlive && displayId >= 0 }?.let { c ->
+            if (c.ping()) {
+                val st = _status.value
+                if (st.w != w || st.h != h || st.dpi != dpi) {
+                    // Geometry changed in settings: the host resizes in
+                    // place, the agent's tasks survive.
+                    ready(c.create(w, h, dpi), w, h, dpi)
+                }
+                return c
+            }
+        }
         client?.close()
         client = null
         displayId = -1
@@ -108,42 +130,72 @@ class VScreenManager(
 
         val dc = daemon.requireClient()
         val jarUpdated = pushJar(dc)
-        var cli = VScreenClient.connect(VScreenClient.SOCKET_NAME, token())
+        val tok = token()
+        var endpoint = settings.vscreenEndpoint.first()
+        var cli = if (HelperConn.isTcp(endpoint)) VScreenClient.connect(endpoint, tok) else null
         // A live host running a stale jar must be replaced — its display
         // keeps the old flags/behavior even though the socket answers.
-        if (cli != null && jarUpdated) {
+        if (cli != null && (jarUpdated || cli.hostVersion != HOST_VERSION)) {
             cli.close(); cli = null
             runCatching { dc.exec(KILL_CMD) }
         }
         if (cli == null) {
-            spawn(dc)
-            // First spawn pays for dexopt — give it room.
-            repeat(20) {
-                delay(400)
-                cli = VScreenClient.connect(VScreenClient.SOCKET_NAME, token())
-                if (cli != null) return@repeat
+            endpoint = spawn(dc, tok)
+            // First spawn pays for dexopt — give it room, but stop at the
+            // first answer.
+            for (attempt in 0 until 40) {
+                delay(250)
+                cli = VScreenClient.connect(endpoint, tok)
+                if (cli != null) break
             }
         }
         val c = cli ?: throw IllegalStateException(hostLogTail(dc))
 
-        // Ensure the display exists at the configured size.
-        val (w, h, dpi) = wantedSize()
         var info = c.info()
-        var id = info.optInt("display_id", -1)
-        if (id < 0 || info.optInt("w") != w || info.optInt("h") != h) {
+        val fresh = info.optInt("display_id", -1) < 0
+        if (fresh || info.optInt("w") != w || info.optInt("h") != h || info.optInt("dpi") != dpi) {
             info = c.create(w, h, dpi)
-            id = info.optInt("display_id", -1)
         }
-        if (id < 0) throw IllegalStateException("display create failed")
-
+        if (info.optInt("display_id", -1) < 0) throw IllegalStateException("display create failed")
         client = c
+        ready(info, w, h, dpi)
+        // Never leave a new display empty: an empty public virtual display
+        // mirrors the default one, so a screenshot would show the user's
+        // real screen. The backdrop is also the agent's "home" there. (A
+        // reconnect to a live display keeps whatever the agent had open.)
+        if (fresh) launchHome(dc)
+        c
+    }
+
+    private fun ready(info: org.json.JSONObject, w: Int, h: Int, dpi: Int) {
+        val id = info.optInt("display_id", -1)
         displayId = id
         attachA11y(id, w, h)
+        val ownFocus = info.optBoolean("own_focus")
+        val imeHidden = info.optBoolean("ime_hidden")
         _status.value = VScreenStatus(
             state = VState.READY, displayId = id, w = w, h = h, dpi = dpi,
-            detail = "display $id · ${w}x$h@$dpi",
+            ownFocus = ownFocus, imeHidden = imeHidden,
+            detail = "display $id · ${w}x$h@$dpi" +
+                (if (info.optBoolean("trusted")) " · trusted" else "") +
+                (if (ownFocus) " · own focus" else ""),
         )
-        c
+    }
+
+    /** Bring the backdrop to the front of the virtual display — the
+     *  `home` key there (HOME itself is a no-op on a display without
+     *  system decorations). False when the daemon is down. */
+    suspend fun goHome(): Boolean {
+        val dc = daemon.client?.takeIf { it.isAlive } ?: return false
+        return launchHome(dc)
+    }
+
+    private suspend fun launchHome(dc: DaemonClient): Boolean {
+        val id = displayId.takeIf { it >= 0 } ?: return false
+        val comp = "${context.packageName}/${VScreenHomeActivity::class.java.name}"
+        return runCatching {
+            dc.exec("am start --display $id -n ${sq(comp)}", 10_000).exit == 0
+        }.getOrDefault(false)
     }
 
     /** Called from settings: turn the feature off/on. On disable the host
@@ -165,12 +217,13 @@ class VScreenManager(
         client = null
         displayId = -1
         detachA11y()
+        settings.setVscreenEndpoint("")
         _status.value = VScreenStatus(state = VState.OFF)
     }
 
     /** Push the bundled host jar when the remote copy is stale; true when
      *  a new jar was written (a running host then needs a respawn). */
-    private suspend fun pushJar(dc: com.boxagent.app.daemon.DaemonClient): Boolean {
+    private suspend fun pushJar(dc: DaemonClient): Boolean {
         val jar = context.assets.open("vscreen.jar").use { it.readBytes() }
         val remote = runCatching {
             dc.exec("md5sum $REMOTE_JAR 2>/dev/null | cut -d' ' -f1").stdout.trim()
@@ -192,11 +245,13 @@ class VScreenManager(
      * them, so we forward it; a /proc environ scrape remains as fallback
      * for runtimes where the app env is also stripped.
      */
-    private suspend fun spawn(dc: com.boxagent.app.daemon.DaemonClient) {
+    private suspend fun spawn(dc: DaemonClient, tok: String): String {
         // A dead-but-listening old host (stale token, wedged reader) must
-        // go before a new one can bind the abstract socket.
+        // go first — it would otherwise keep its display alive.
         dc.exec(KILL_CMD)
-        val tok = token()
+        // Loopback TCP: apps can't connectto a shell-owned unix socket
+        // under SELinux (see HelperConn).
+        val port = HelperConn.freePort()
         val script = """
 export ANDROID_DATA=/data/local/tmp
 ${hostEnvLines()}
@@ -208,9 +263,11 @@ if [ -z "${'$'}BOOTCLASSPATH" ]; then
     [ -n "${'$'}v" ] && export BOOTCLASSPATH="${'$'}{v#BOOTCLASSPATH=}" && break
   done
 fi
-CLASSPATH=$REMOTE_JAR setsid app_process /system/bin com.boxagent.vscreen.Main --socket ${VScreenClient.SOCKET_NAME} --token $tok </dev/null >>$HOST_LOG 2>&1 &
+rm -f $FATAL_LOG
+CLASSPATH=$REMOTE_JAR setsid app_process /system/bin com.boxagent.vscreen.Main --port $port --token $tok </dev/null >>$HOST_LOG 2>&1 &
         """.trimIndent()
         dc.exec("sh -c ${sq(script)}", 10_000)
+        return HelperConn.tcp(port).also { settings.setVscreenEndpoint(it) }
     }
 
     /** `export K='v'` lines for ART env the app process inherited from
@@ -227,9 +284,9 @@ CLASSPATH=$REMOTE_JAR setsid app_process /system/bin com.boxagent.vscreen.Main -
         }.joinToString("\n")
     }
 
-    private suspend fun hostLogTail(dc: com.boxagent.app.daemon.DaemonClient): String {
+    private suspend fun hostLogTail(dc: DaemonClient): String {
         val tail = runCatching {
-            dc.exec("tail -n 5 $HOST_LOG 2>/dev/null").stdout.trim()
+            dc.exec("tail -n 3 $FATAL_LOG 2>/dev/null; tail -n 5 $HOST_LOG 2>/dev/null").stdout.trim()
         }.getOrDefault("")
         return "vscreen host not reachable" +
             if (tail.isEmpty()) "" else " — host log: $tail"
@@ -295,12 +352,24 @@ CLASSPATH=$REMOTE_JAR setsid app_process /system/bin com.boxagent.vscreen.Main -
             runCatching {
                 cli().pinch(cx.toDouble(), cy.toDouble(), zoomIn, percent); true
             }.getOrDefault(false)
+        override suspend fun drag(
+            x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long, holdMs: Long,
+        ) = runCatching {
+            cli().drag(
+                x1.toDouble(), y1.toDouble(), x2.toDouble(), y2.toDouble(),
+                durationMs, holdMs,
+            )
+            true
+        }.getOrDefault(false)
     }
 
     companion object {
         const val REMOTE_JAR = "/data/local/tmp/boxagent-vscreen.jar"
         const val HOST_LOG = "/data/local/tmp/vscreen.log"
         const val PID_FILE = "/data/local/tmp/boxagent-vscreen.pid"
+        const val FATAL_LOG = "/data/local/tmp/vscreen.fatal"
+        /** Main.VERSION of the bundled host jar. */
+        const val HOST_VERSION = "3"
         // Shell can't enumerate the host (restricted /proc view) — the
         // host records its pid here at startup so `kill` still reaches it.
         private val KILL_CMD =

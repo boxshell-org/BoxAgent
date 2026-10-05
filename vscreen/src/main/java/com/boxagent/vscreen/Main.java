@@ -1,9 +1,9 @@
 package com.boxagent.vscreen;
 
 import android.hardware.input.InputManager;
-import android.net.LocalServerSocket;
-import android.net.LocalSocket;
-import android.net.LocalSocketAddress;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
@@ -14,35 +14,54 @@ import android.view.Surface;
 
 import org.json.JSONObject;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
 /**
  * Shell-uid companion to boxagentd: owns one logical virtual display and
  * injects input onto it. Runs under `app_process`; speaks the same frame
- * format as the daemon (4-byte BE length + JSON) on an abstract socket.
+ * format as the daemon (4-byte BE length + JSON) on a loopback TCP port.
  *
  * Why this exists: a usable virtual screen needs a *logical* display —
- * `am start --display`, accessibility windows and `screencap -d` all key
+ * `am start --display`, accessibility windows and input routing all key
  * off DisplayManager ids, so `DisplayManagerGlobal.createVirtualDisplay`
  * is the only path. It's a hidden API, so everything there is reflection.
+ *
+ * Why TCP: SELinux on user builds denies apps `connectto` on unix sockets
+ * owned by the shell domain, so an abstract socket only works on
+ * permissive builds. The token keeps other local apps out.
  */
 public final class Main {
 
-    private static final String VERSION = "1";
+    private static final String VERSION = "3";
     private static final int MAX_FRAME = 4 * 1024 * 1024;
+    private static final int AUTH_TIMEOUT_MS = 5_000;
 
     private static final int INJECT_ASYNC = 0;   // InputManager.INJECT_INPUT_EVENT_MODE_ASYNC
-    private static final int INJECT_SYNC = 2;    // INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH
+    private static final int IME_POLICY_HIDE = 2; // WindowManager.DISPLAY_IME_POLICY_HIDE
 
-    private static int displayId = -1;
+    private static volatile int displayId = -1;
     private static int displayW, displayH, displayDpi;
     private static Object vdObject; // android.hardware.display.VirtualDisplay — release() frees it
     private static android.media.ImageReader imageReader;
-    private static Surface sinkSurface;
+    /** Which optional behaviours the display actually got (reported in `info`). */
+    private static boolean trusted, ownFocus, destroysContent, imeHidden;
+
+    // Newest composited frame. The reader is drained as frames arrive —
+    // left alone its queue fills and later frames are dropped, so an
+    // on-demand acquire would hand back a stale, mid-animation frame.
+    private static final Object frameLock = new Object();
+    private static android.media.Image latestFrame;
+    private static long frameSeq;
+    private static HandlerThread frameThread;
 
     public static void main(String[] args) {
         // RuntimeInit swallows main() failures quietly; make them visible.
@@ -57,17 +76,23 @@ public final class Main {
             } catch (Throwable ignored) {}
             t.printStackTrace();
         }
+        System.exit(1);
     }
 
     private static void run(String[] args) throws Exception {
-        String socket = "boxagent.vscreen";
+        int port = -1;
         String token = "";
         for (int i = 0; i < args.length - 1; i++) {
-            if (args[i].equals("--socket")) socket = args[i + 1];
+            if (args[i].equals("--port")) port = Integer.parseInt(args[i + 1]);
             if (args[i].equals("--token")) token = args[i + 1];
         }
+        if (port <= 0 || token.isEmpty()) throw new IllegalArgumentException("--port and --token required");
         final String tok = token;
         Workarounds.prepare();
+
+        // Loopback only. A port that is taken means another host (or
+        // anything else) owns it — exit rather than fight over it.
+        ServerSocket server = new ServerSocket(port, 16, InetAddress.getByName("127.0.0.1"));
 
         // Shell can't enumerate our process (restricted /proc view), so
         // the manager stops us through this pid file instead of pkill.
@@ -78,24 +103,11 @@ public final class Main {
         } catch (Throwable t) {
             log("pid file: " + t);
         }
-
-        // Abstract socket names are not exclusive on Linux — a second
-        // instance would bind the same name and split the client pool.
-        // Refuse to start while another host still answers.
-        try {
-            LocalSocket probe = new LocalSocket();
-            probe.connect(new LocalSocketAddress(socket, LocalSocketAddress.Namespace.ABSTRACT));
-            probe.close();
-            log("another host is already listening — exiting");
-            return;
-        } catch (Throwable ignored) {
-        }
-
-        LocalServerSocket server = new LocalServerSocket(socket);
-        log("vscreen host up on " + socket);
+        log("vscreen host v" + VERSION + " up on 127.0.0.1:" + port);
         try {
             while (true) {
-                LocalSocket conn = server.accept();
+                Socket conn = server.accept();
+                conn.setTcpNoDelay(true);
                 new Thread(() -> serve(conn, tok), "vscreen-conn").start();
             }
         } finally {
@@ -106,10 +118,13 @@ public final class Main {
     // ------------------------------------------------------------------
     // Framing + dispatch
 
-    private static void serve(LocalSocket conn, String token) {
+    private static void serve(Socket conn, String token) {
         try {
-            DataInputStream in = new DataInputStream(conn.getInputStream());
-            DataOutputStream out = new DataOutputStream(conn.getOutputStream());
+            DataInputStream in = new DataInputStream(new BufferedInputStream(conn.getInputStream()));
+            DataOutputStream out = new DataOutputStream(new BufferedOutputStream(conn.getOutputStream()));
+            // Any local app can reach the port: a peer that won't
+            // authenticate promptly is dropped.
+            conn.setSoTimeout(AUTH_TIMEOUT_MS);
             JSONObject hello = readFrame(in);
             if (hello == null || !"auth".equals(hello.optString("op"))
                     || !token.equals(hello.optString("token"))) {
@@ -117,6 +132,7 @@ public final class Main {
                 conn.close();
                 return;
             }
+            conn.setSoTimeout(0);
             send(out, new JSONObject().put("ok", true).put("version", VERSION));
             while (true) {
                 JSONObject req = readFrame(in);
@@ -140,29 +156,28 @@ public final class Main {
             case "ping":
                 return ok();
             case "info":
-                return ok()
-                        .put("display_id", displayId)
-                        .put("w", displayW).put("h", displayH).put("dpi", displayDpi)
-                        .put("version", VERSION);
+                return info();
             case "create": {
                 int w = req.optInt("w", 1080), h = req.optInt("h", 2400);
                 int dpi = req.optInt("dpi", 420);
-                return ok().put("display_id", ensureDisplay(w, h, dpi));
+                ensureDisplay(w, h, dpi);
+                return info();
             }
             case "destroy":
                 new Thread(() -> {
                     sleep(150); // let the reply reach the client first
-                    destroyDisplay(); // kills our tasks, releases the display
+                    destroyDisplay(); // drops our tasks, releases the display
                     System.exit(0);
                 }).start();
                 return ok();
             case "tap":
                 requireDisplay();
-                injectTap(req.getDouble("x"), req.getDouble("y"), 60);
+                injectPress(req.getDouble("x"), req.getDouble("y"), 50);
                 return ok();
             case "long_press":
                 requireDisplay();
-                injectTap(req.getDouble("x"), req.getDouble("y"), req.optLong("duration_ms", 800));
+                injectPress(req.getDouble("x"), req.getDouble("y"),
+                        Math.max(500, req.optLong("duration_ms", 800)));
                 return ok();
             case "swipe":
                 requireDisplay();
@@ -170,6 +185,14 @@ public final class Main {
                         req.getDouble("x1"), req.getDouble("y1"),
                         req.getDouble("x2"), req.getDouble("y2"),
                         req.optLong("duration_ms", 300));
+                return ok();
+            case "drag":
+                requireDisplay();
+                injectDrag(
+                        req.getDouble("x1"), req.getDouble("y1"),
+                        req.getDouble("x2"), req.getDouble("y2"),
+                        req.optLong("hold_ms", 350),
+                        req.optLong("duration_ms", 500));
                 return ok();
             case "pinch":
                 requireDisplay();
@@ -181,12 +204,12 @@ public final class Main {
                 requireDisplay();
                 injectKey(req.getInt("code"));
                 return ok();
-            case "screenshot": {
+            case "screenshot":
                 requireDisplay();
-                byte[] png = capturePng();
-                return ok().put("png", png == null ? JSONObject.NULL
-                        : android.util.Base64.encodeToString(png, android.util.Base64.NO_WRAP));
-            }
+                return screenshot(
+                        req.optString("format", "png"),
+                        req.optInt("quality", 80),
+                        req.optInt("max_side", 0));
             case "text":
                 requireDisplay();
                 injectText(req.getString("text"));
@@ -202,6 +225,20 @@ public final class Main {
             default:
                 return new JSONObject().put("ok", false).put("error", "unknown op");
         }
+    }
+
+    private static synchronized JSONObject info() throws Exception {
+        long seq;
+        synchronized (frameLock) { seq = frameSeq; }
+        return ok()
+                .put("display_id", displayId)
+                .put("w", displayW).put("h", displayH).put("dpi", displayDpi)
+                .put("trusted", trusted)
+                .put("own_focus", ownFocus)
+                .put("destroys_content", destroysContent)
+                .put("ime_hidden", imeHidden)
+                .put("frame_seq", seq)
+                .put("version", VERSION);
     }
 
     private static JSONObject readFrame(DataInputStream in) throws Exception {
@@ -237,7 +274,8 @@ public final class Main {
     // Virtual display lifecycle
 
     /** Reads a VIRTUAL_DISPLAY_FLAG_* constant from DisplayManager — bit
-     *  positions moved across API levels, never hardcode them. */
+     *  positions moved across API levels, never hardcode them. 0 when the
+     *  flag doesn't exist on this build. */
     private static int vdFlag(Class<?> dmCls, String name) {
         try {
             return dmCls.getDeclaredField(name).getInt(null);
@@ -246,21 +284,75 @@ public final class Main {
         }
     }
 
-    private static synchronized int ensureDisplay(int w, int h, int dpi) throws Exception {
-        if (displayId >= 0) return displayId;
+    private static synchronized void ensureDisplay(int w, int h, int dpi) throws Exception {
+        if (displayId >= 0) {
+            if (w != displayW || h != displayH || dpi != displayDpi) resizeDisplay(w, h, dpi);
+            return;
+        }
+        Class<?> dm = Class.forName("android.hardware.display.DisplayManager");
+        // Minimal: what the agent can't work without. OWN_CONTENT_ONLY is
+        // deliberately absent — it hides the display's windows from
+        // accessibility services, and a11y is how the agent sees.
+        int minimal = vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_PUBLIC")
+                | vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH");
+        // Permission-free improvements:
+        //  DESTROY_CONTENT_ON_REMOVAL — on teardown the display's tasks are
+        //    destroyed instead of migrating onto the user's screen;
+        //  TOUCH_FEEDBACK_DISABLED — agent taps don't buzz the phone.
+        int base = minimal
+                | vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL")
+                | vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_TOUCH_FEEDBACK_DISABLED");
+        // Trusted (shell holds ADD_TRUSTED_DISPLAY on stock builds):
+        //  OWN_FOCUS (14+) — the display keeps its own focused window, so
+        //    keys/text reach the agent's app without stealing focus (and
+        //    the IME connection) from whatever the user is doing;
+        //  STEAL_TOP_FOCUS_DISABLED (15+) — touching it doesn't make it
+        //    the top-focused display either.
+        int trustedFlags = base
+                | vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_TRUSTED")
+                | vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_OWN_FOCUS")
+                | vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_STEAL_TOP_FOCUS_DISABLED");
 
-        Class<?> dmCls = Class.forName("android.hardware.display.DisplayManager");
-        int flags = vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_PUBLIC")
-                | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_SUPPORTS_TOUCH")
-                | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_SUPPORT_TOUCH")
-                | vdFlag(dmCls, "VIRTUAL_DISPLAY_FLAG_OWN_FOCUS");
-        // TRUSTED / OWN_DISPLAY_GROUP / ALWAYS_UNLOCKED excluded — each
-        // needs an internal permission shell uid does not hold (server-
-        // side check in DMS). OWN_CONTENT_ONLY is also out: it makes WMS
-        // hide the display's windows from accessibility services, and
-        // without a11y windows the agent can't see or act here.
-        log("vd flags=0x" + Integer.toHexString(flags));
+        android.media.ImageReader reader = newReader(w, h);
+        // Current before the display exists: its very first frame may be
+        // the only one for a while (static content).
+        synchronized (frameLock) { imageReader = reader; }
+        Throwable last = null;
+        for (int flags : new int[]{trustedFlags, base, minimal}) {
+            try {
+                Object vd = createVirtualDisplay(w, h, dpi, flags, reader.getSurface());
+                int id = displayIdOf(vd);
+                if (id <= 0) throw new IllegalStateException("no display id");
+                vdObject = vd;
+                displayId = id;
+                displayW = w;
+                displayH = h;
+                displayDpi = dpi;
+                trusted = (flags & vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_TRUSTED")) != 0;
+                ownFocus = (flags & vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_OWN_FOCUS")) != 0;
+                destroysContent =
+                        (flags & vdFlag(dm, "VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL")) != 0;
+                log("created display " + id + " " + w + "x" + h + "@" + dpi
+                        + " flags=0x" + Integer.toHexString(flags));
+                // Agent text goes in through accessibility (set-text); a
+                // soft keyboard here would fall back to the default display
+                // and pop up on the user's screen.
+                imeHidden = hideIme(id);
+                return;
+            } catch (Throwable t) {
+                last = t instanceof java.lang.reflect.InvocationTargetException && t.getCause() != null
+                        ? t.getCause() : t;
+                log("createVirtualDisplay flags=0x" + Integer.toHexString(flags) + " failed: " + last);
+            }
+        }
+        synchronized (frameLock) { imageReader = null; }
+        reader.close();
+        throw new IllegalStateException("createVirtualDisplay failed: "
+                + (last != null ? String.valueOf(last.getMessage()) : "no compatible signature"));
+    }
 
+    private static Object createVirtualDisplay(int w, int h, int dpi, int flags, Surface surface)
+            throws Exception {
         Class<?> builderCls = Class.forName("android.hardware.display.VirtualDisplayConfig$Builder");
         Object builder = builderCls
                 .getDeclaredConstructor(String.class, int.class, int.class, int.class)
@@ -272,10 +364,7 @@ public final class Main {
         // Display output lands in our ImageReader — the only reliable way to
         // read frames back (SurfaceFlinger has no display device for virtual
         // displays on some builds, so `screencap -d` can't see it).
-        imageReader = android.media.ImageReader.newInstance(
-                w, h, android.graphics.PixelFormat.RGBA_8888, 3);
-        sinkSurface = imageReader.getSurface();
-        call(builder, "setSurface", new Class<?>[]{Surface.class}, sinkSurface);
+        call(builder, "setSurface", new Class<?>[]{Surface.class}, surface);
         Object config = call(builder, "build", new Class<?>[]{});
 
         Class<?> dmgCls = Class.forName("android.hardware.display.DisplayManagerGlobal");
@@ -289,14 +378,14 @@ public final class Main {
         Throwable last = null;
         for (Method m : dmgCls.getDeclaredMethods()) {
             if (!m.getName().equals("createVirtualDisplay")) continue;
-            // Android 15+: (Context, MediaProjection, VirtualDisplayConfig,
-            // Callback, Executor) — Context gets the real one, rest nullable.
+            // Android 11+: (Context, MediaProjection, VirtualDisplayConfig,
+            // Callback, Handler|Executor) — Context gets ours, rest nullable.
             Class<?>[] types = m.getParameterTypes();
             Object[] args = new Object[types.length];
-            boolean usable = true;
+            boolean usable = false;
             for (int i = 0; i < types.length; i++) {
                 String n = types[i].getName();
-                if (n.endsWith("VirtualDisplayConfig")) args[i] = config;
+                if (n.endsWith("VirtualDisplayConfig")) { args[i] = config; usable = true; }
                 else if (n.equals("android.content.Context")) args[i] = ctx;
                 else if (types[i].isPrimitive()) { usable = false; break; }
                 else args[i] = null;
@@ -305,29 +394,62 @@ public final class Main {
             try {
                 m.setAccessible(true);
                 Object vd = m.invoke(dmg, args);
-                int id = displayIdOf(vd);
-                if (id > 0) {
-                    vdObject = vd;
-                    displayId = id;
-                    displayW = w;
-                    displayH = h;
-                    displayDpi = dpi;
-                    log("created display " + id + " " + w + "x" + h + "@" + dpi);
-                    return id;
-                }
+                if (vd != null) return vd;
+            } catch (java.lang.reflect.InvocationTargetException t) {
+                // SecurityException: a flag we may not use — the caller
+                // retries with a smaller set. Anything else: maybe just
+                // the wrong overload, try the next one.
+                if (t.getCause() instanceof SecurityException) throw t;
+                last = t.getCause() != null ? t.getCause() : t;
             } catch (Throwable t) {
                 last = t;
-                log("createVirtualDisplay threw " + t);
-                for (StackTraceElement e : t.getStackTrace()) log("  at " + e);
-                if (t.getCause() != null) {
-                    log("  cause: " + t.getCause());
-                    for (StackTraceElement e : t.getCause().getStackTrace())
-                        log("    at " + e);
-                }
             }
         }
-        throw new IllegalStateException("createVirtualDisplay failed: "
-                + (last != null ? String.valueOf(last.getMessage()) : "no compatible signature"));
+        throw new IllegalStateException("no compatible createVirtualDisplay"
+                + (last != null ? ": " + last : ""));
+    }
+
+    private static android.media.ImageReader newReader(int w, int h) {
+        if (frameThread == null) {
+            frameThread = new HandlerThread("vscreen-frames");
+            frameThread.start();
+        }
+        android.media.ImageReader r = android.media.ImageReader.newInstance(
+                w, h, android.graphics.PixelFormat.RGBA_8888, 3);
+        r.setOnImageAvailableListener(reader -> {
+            android.media.Image img;
+            try {
+                img = reader.acquireLatestImage();
+            } catch (Throwable t) {
+                return; // all buffers held; the next callback catches up
+            }
+            if (img == null) return;
+            synchronized (frameLock) {
+                if (reader != imageReader) { img.close(); return; } // resized away
+                if (latestFrame != null) latestFrame.close();
+                latestFrame = img;
+                frameSeq++;
+            }
+        }, new Handler(frameThread.getLooper()));
+        return r;
+    }
+
+    /** New size: point the display at a fresh reader, then resize it —
+     *  both public VirtualDisplay calls, no recreation (tasks survive). */
+    private static void resizeDisplay(int w, int h, int dpi) throws Exception {
+        android.media.ImageReader old = imageReader;
+        android.media.ImageReader fresh = newReader(w, h);
+        synchronized (frameLock) {
+            imageReader = fresh;
+            if (latestFrame != null) { latestFrame.close(); latestFrame = null; }
+        }
+        call(vdObject, "setSurface", new Class<?>[]{Surface.class}, fresh.getSurface());
+        call(vdObject, "resize", new Class<?>[]{int.class, int.class, int.class}, w, h, dpi);
+        displayW = w;
+        displayH = h;
+        displayDpi = dpi;
+        if (old != null) try { old.close(); } catch (Throwable ignored) {}
+        log("resized display " + displayId + " to " + w + "x" + h + "@" + dpi);
     }
 
     private static int displayIdOf(Object vd) {
@@ -340,9 +462,38 @@ public final class Main {
         }
     }
 
+    /** IWindowManager.setDisplayImePolicy(id, HIDE) (12+), or
+     *  setShouldShowIme(id, false) on 11. Shell holds the permission on
+     *  stock builds (scrcpy's --display-ime-policy relies on it). */
+    private static boolean hideIme(int id) {
+        try {
+            Object wm = service("window", "android.view.IWindowManager$Stub");
+            try {
+                wm.getClass().getMethod("setDisplayImePolicy", int.class, int.class)
+                        .invoke(wm, id, IME_POLICY_HIDE);
+            } catch (NoSuchMethodException e) {
+                wm.getClass().getMethod("setShouldShowIme", int.class, boolean.class)
+                        .invoke(wm, id, false);
+            }
+            return true;
+        } catch (Throwable t) {
+            log("ime policy: " + (t.getCause() != null ? t.getCause() : t));
+            return false;
+        }
+    }
+
+    private static Object service(String name, String stub) throws Exception {
+        IBinder b = (IBinder) Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String.class).invoke(null, name);
+        return Class.forName(stub).getMethod("asInterface", IBinder.class).invoke(null, b);
+    }
+
     private static synchronized void destroyDisplay() {
         int id = displayId;
-        if (id >= 0) removeTasksOnDisplay(id);
+        // With DESTROY_CONTENT_ON_REMOVAL the framework finishes the
+        // display's tasks itself. Without it they would migrate onto the
+        // user's screen — remove exactly those root tasks first.
+        if (id >= 0 && !destroysContent) removeTasksOnDisplay(id);
         if (vdObject != null) {
             try {
                 vdObject.getClass().getMethod("release").invoke(vdObject);
@@ -350,125 +501,109 @@ public final class Main {
             vdObject = null;
         }
         displayId = -1;
-        lastPng = null;
-        if (sinkSurface != null) try { sinkSurface.release(); } catch (Throwable ignored) {}
-        if (imageReader != null) try { imageReader.close(); } catch (Throwable ignored) {}
+        synchronized (frameLock) {
+            if (latestFrame != null) { latestFrame.close(); latestFrame = null; }
+            if (imageReader != null) try { imageReader.close(); } catch (Throwable ignored) {}
+            imageReader = null;
+        }
     }
 
     /**
-     * Destroying a display while its tasks live migrates them onto the
-     * default display — the agent's apps would spill onto the user's
-     * screen. Force-stop the packages whose tasks sit on this display
-     * first instead. Task data comes from `dumpsys activity activities`:
-     * the IActivityTaskManager binder exposes no getTasks to reflect.
+     * Fallback teardown for builds without DESTROY_CONTENT_ON_REMOVAL:
+     * remove the root tasks `am stack list` places on this display, by
+     * id. Never force-stops packages — that would also kill the user's
+     * own copy of the app on the physical screen.
      */
     private static void removeTasksOnDisplay(int displayId) {
         try {
-            Process p = Runtime.getRuntime().exec(new String[]{
-                    "/system/bin/sh", "-c", "dumpsys activity activities"});
-            String dump = new String(p.getInputStream().readAllBytes());
-            p.waitFor();
-            // Collect package candidates from the display's section:
-            // component forms `I=com.pkg/.Cls` and `ActivityRecord{... pkg/.Cls}`
-            // are exact; `A=uid:affinity` may carry a task-affinity suffix.
-            java.util.Set<String> cands = new java.util.HashSet<>();
-            java.util.regex.Matcher comp = java.util.regex.Pattern
-                    .compile("(?:I=|ActivityRecord\\{[^\\n]*? u\\d+ )([\\w.]+)/")
-                    .matcher("");
-            java.util.regex.Matcher aff = java.util.regex.Pattern
-                    .compile("A=\\d+:([\\w.]+)").matcher("");
-            boolean onDisplay = false;
-            for (String line : dump.split("\n")) {
-                // Display sections and top-level dump headings sit at col 0;
-                // everything inside a display's block is indented. Trailing
-                // recap lines (mFocusedApp etc.) live outside — ignore them.
-                if (!line.isEmpty() && !Character.isWhitespace(line.charAt(0))) {
-                    onDisplay = line.contains("Display #" + displayId + " ");
-                }
-                if (!onDisplay) continue;
-                comp.reset(line);
-                while (comp.find()) cands.add(comp.group(1));
-                aff.reset(line);
-                while (aff.find()) cands.add(aff.group(1));
-            }
-            java.util.Set<String> pkgs = new java.util.HashSet<>();
-            for (String cand : cands) {
-                String pkg = resolvePackage(cand);
-                if (pkg != null && !pkg.startsWith("com.boxagent.")) pkgs.add(pkg);
-            }
-            for (String pkg : pkgs) {
-                log("force-stop " + pkg + " (display " + displayId + " teardown)");
-                try {
-                    Runtime.getRuntime().exec(new String[]{
-                            "/system/bin/sh", "-c", "am force-stop " + pkg})
-                            .waitFor();
-                } catch (Throwable ignored) {}
+            String dump = sh("am stack list");
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("(?:RootTask|Stack) id=(\\d+)[^\\n]*?displayId=(\\d+)")
+                    .matcher(dump);
+            while (m.find()) {
+                if (Integer.parseInt(m.group(2)) != displayId) continue;
+                log("remove root task " + m.group(1) + " (display " + displayId + " teardown)");
+                sh("am stack remove " + m.group(1));
             }
         } catch (Throwable t) {
             log("removeTasksOnDisplay failed: " + t);
         }
     }
 
-    /** `pm path` probe: shrink an affinity-ish candidate to a real package. */
-    private static String resolvePackage(String cand) {
-        for (String s = cand; s != null && s.contains("."); s = s.substring(0, s.lastIndexOf('.'))) {
-            try {
-                Process p = Runtime.getRuntime().exec(new String[]{
-                        "/system/bin/sh", "-c", "pm path " + s});
-                String out = new String(p.getInputStream().readAllBytes());
-                p.waitFor();
-                if (out.contains("package:")) return s;
-            } catch (Throwable ignored) {}
-        }
-        return null;
+    private static String sh(String cmd) throws Exception {
+        Process p = Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
+        String out = new String(p.getInputStream().readAllBytes());
+        p.waitFor();
+        return out;
     }
 
     // ------------------------------------------------------------------
     // Frame capture
 
-    private static byte[] lastPng;
-
-    /** Latest composited frame as a PNG. Frames arrive on change only, so we
-     *  cache the last encode — a screenshot between changes returns it. */
-    private static byte[] capturePng() {
-        if (imageReader == null) throw new IllegalStateException("no display");
-        android.media.Image img = imageReader.acquireLatestImage();
-        if (img == null) return lastPng; // nothing new rendered
-        try {
-            android.media.Image.Plane p = img.getPlanes()[0];
-            java.nio.ByteBuffer buf = p.getBuffer();
-            int stride = p.getRowStride(), px = p.getPixelStride();
-            int w = img.getWidth(), h = img.getHeight();
-            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
-                    w, h, android.graphics.Bitmap.Config.ARGB_8888);
-            // RGBA_8888 rows may be padded — copy row-wise when stride differs.
-            if (stride == w * px) {
-                bmp.copyPixelsFromBuffer(buf);
-            } else {
-                byte[] row = new byte[w * px];
-                for (int y = 0; y < h; y++) {
-                    buf.position(y * stride);
-                    buf.get(row, 0, row.length);
-                    bmp.setPixels(intsOf(row), 0, w, 0, y, w, 1);
-                }
+    /**
+     * Newest composited frame, optionally downscaled to [maxSide] and
+     * JPEG-encoded — the vision path wants ~1024px JPEG, and doing that
+     * here beats shipping a full-size PNG over the socket to re-encode.
+     * Returns data=null when nothing has rendered yet.
+     */
+    private static JSONObject screenshot(String format, int quality, int maxSide) throws Exception {
+        android.graphics.Bitmap bmp;
+        long seq;
+        synchronized (frameLock) {
+            if (latestFrame == null) {
+                return ok().put("data_b64", JSONObject.NULL).put("frame_seq", frameSeq);
             }
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out);
-            lastPng = out.toByteArray();
-            return lastPng;
-        } finally {
-            img.close();
+            bmp = toBitmap(latestFrame);
+            seq = frameSeq;
         }
+        int srcW = bmp.getWidth(), srcH = bmp.getHeight();
+        if (maxSide > 0 && Math.max(srcW, srcH) > maxSide) {
+            float s = maxSide / (float) Math.max(srcW, srcH);
+            android.graphics.Bitmap scaled = android.graphics.Bitmap.createScaledBitmap(
+                    bmp, Math.max(1, Math.round(srcW * s)), Math.max(1, Math.round(srcH * s)), true);
+            bmp.recycle();
+            bmp = scaled;
+        }
+        boolean jpeg = "jpeg".equals(format) || "jpg".equals(format);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        bmp.compress(jpeg ? android.graphics.Bitmap.CompressFormat.JPEG
+                        : android.graphics.Bitmap.CompressFormat.PNG,
+                Math.max(1, Math.min(100, quality)), out);
+        JSONObject r = ok()
+                .put("data_b64", android.util.Base64.encodeToString(
+                        out.toByteArray(), android.util.Base64.NO_WRAP))
+                .put("mime", jpeg ? "image/jpeg" : "image/png")
+                .put("w", bmp.getWidth()).put("h", bmp.getHeight())
+                .put("src_w", srcW).put("src_h", srcH)
+                .put("frame_seq", seq);
+        bmp.recycle();
+        return r;
     }
 
-    private static int[] intsOf(byte[] rgba) {
-        int[] px = new int[rgba.length / 4];
-        for (int i = 0; i < px.length; i++) {
-            int o = i * 4;
-            px[i] = (rgba[o] & 0xff) << 16 | (rgba[o + 1] & 0xff) << 8
-                    | (rgba[o + 2] & 0xff) | 0xff000000 | ((rgba[o + 3] & 0xff) << 24);
+    /** RGBA_8888 image → ARGB bitmap. Rows may be padded: copy the padded
+     *  buffer whole and crop, instead of a per-row pixel loop. */
+    private static android.graphics.Bitmap toBitmap(android.media.Image img) {
+        android.media.Image.Plane p = img.getPlanes()[0];
+        java.nio.ByteBuffer buf = p.getBuffer();
+        buf.rewind();
+        int w = img.getWidth(), h = img.getHeight();
+        int px = p.getPixelStride(), stride = p.getRowStride();
+        int padded = stride / px;
+        if (buf.remaining() < stride * h) {
+            // The last row usually isn't padded — pad the copy so the
+            // whole-buffer copy below has stride*h bytes to read.
+            java.nio.ByteBuffer tmp = java.nio.ByteBuffer.allocate(stride * h);
+            tmp.put(buf);
+            tmp.rewind();
+            buf = tmp;
         }
-        return px;
+        android.graphics.Bitmap full = android.graphics.Bitmap.createBitmap(
+                padded, h, android.graphics.Bitmap.Config.ARGB_8888);
+        full.copyPixelsFromBuffer(buf);
+        if (padded == w) return full;
+        android.graphics.Bitmap cropped = android.graphics.Bitmap.createBitmap(full, 0, 0, w, h);
+        full.recycle();
+        return cropped;
     }
 
     private static void requireDisplay() {
@@ -476,27 +611,54 @@ public final class Main {
     }
 
     // ------------------------------------------------------------------
-    // Input injection (all events stamped with the virtual display id)
+    // Input injection (all events stamped with the virtual display id).
+    //
+    // Events go out in real time: views decide long-press, fling and
+    // drag-vs-tap from wall-clock gaps between deliveries, so injecting a
+    // whole gesture at once (future timestamps) turns a long press into
+    // a tap and a scroll into a jump.
 
-    private static void injectTap(double x, double y, long durationMs) {
+    private static void injectPress(double x, double y, long durationMs) {
         long down = SystemClock.uptimeMillis();
         touchEvent(down, MotionEvent.ACTION_DOWN, f(x), f(y), new int[]{0});
-        touchEvent(down + durationMs, MotionEvent.ACTION_UP, f(x), f(y), new int[]{0});
+        sleep(durationMs);
+        touchEvent(down, MotionEvent.ACTION_UP, f(x), f(y), new int[]{0});
     }
 
     private static void injectSwipe(double x1, double y1, double x2, double y2, long durationMs) {
+        durationMs = Math.max(50, Math.min(durationMs, 10_000));
         long down = SystemClock.uptimeMillis();
         touchEvent(down, MotionEvent.ACTION_DOWN, f(x1), f(y1), new int[]{0});
         int steps = Math.max(2, (int) (durationMs / 16));
         for (int i = 1; i <= steps; i++) {
             float t = i / (float) steps;
-            touchEvent(down + (long) (t * durationMs), MotionEvent.ACTION_MOVE,
+            sleepUntil(down + (long) (t * durationMs));
+            touchEvent(down, MotionEvent.ACTION_MOVE,
                     f(x1 + (x2 - x1) * t), f(y1 + (y2 - y1) * t), new int[]{0});
         }
-        touchEvent(down + durationMs, MotionEvent.ACTION_UP, f(x2), f(y2), new int[]{0});
+        touchEvent(down, MotionEvent.ACTION_UP, f(x2), f(y2), new int[]{0});
     }
 
-    /** Two fingers converging (zoom_in) or diverging, over 300 ms. */
+    /** Down, hold in place (long-press registers the drag), then move to
+     *  the target and release. */
+    private static void injectDrag(double x1, double y1, double x2, double y2,
+                                   long holdMs, long durationMs) {
+        holdMs = Math.max(0, Math.min(holdMs, 5_000));
+        durationMs = Math.max(50, Math.min(durationMs, 10_000));
+        long down = SystemClock.uptimeMillis();
+        touchEvent(down, MotionEvent.ACTION_DOWN, f(x1), f(y1), new int[]{0});
+        sleep(holdMs);
+        int steps = Math.max(2, (int) (durationMs / 16));
+        for (int i = 1; i <= steps; i++) {
+            float t = i / (float) steps;
+            sleepUntil(down + holdMs + (long) (t * durationMs));
+            touchEvent(down, MotionEvent.ACTION_MOVE,
+                    f(x1 + (x2 - x1) * t), f(y1 + (y2 - y1) * t), new int[]{0});
+        }
+        touchEvent(down, MotionEvent.ACTION_UP, f(x2), f(y2), new int[]{0});
+    }
+
+    /** Two fingers converging (zoom_in=false) or diverging, over 300 ms. */
     private static void injectPinch(double cx, double cy, boolean zoomIn, int percent) {
         float span = (Math.min(100, Math.max(1, percent)) / 100f) * 400f;
         float from = zoomIn ? 60f : span, to = zoomIn ? span : 60f;
@@ -508,47 +670,53 @@ public final class Main {
                 | (1 << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
         touchEvent(down, MotionEvent.ACTION_DOWN,
                 new float[]{p1x}, new float[]{(float) cy}, new int[]{0});
-        touchEvent(down + 10, secondPointerDown,
+        sleep(10);
+        touchEvent(down, secondPointerDown,
                 new float[]{p1x, p2x}, new float[]{(float) cy, (float) cy}, new int[]{0, 1});
         int steps = 16;
         for (int i = 1; i <= steps; i++) {
             float t = i / (float) steps;
             float d = from + (to - from) * t;
-            touchEvent(down + 10 + (long) (t * 290), MotionEvent.ACTION_MOVE,
+            sleepUntil(down + 10 + (long) (t * 290));
+            touchEvent(down, MotionEvent.ACTION_MOVE,
                     new float[]{(float) cx - d, (float) cx + d},
                     new float[]{(float) cy, (float) cy}, new int[]{0, 1});
         }
-        long end = down + 300;
-        touchEvent(end, secondPointerUp,
+        touchEvent(down, secondPointerUp,
                 new float[]{(float) cx - to, (float) cx + to},
                 new float[]{(float) cy, (float) cy}, new int[]{0, 1});
-        touchEvent(end + 10, MotionEvent.ACTION_UP,
+        sleep(10);
+        touchEvent(down, MotionEvent.ACTION_UP,
                 new float[]{(float) cx - to}, new float[]{(float) cy}, new int[]{0});
     }
 
     private static void injectKey(int keyCode) {
         long now = SystemClock.uptimeMillis();
-        inject(new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0));
-        inject(new KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0));
+        inject(key(now, KeyEvent.ACTION_DOWN, keyCode));
+        inject(key(now, KeyEvent.ACTION_UP, keyCode));
     }
 
-    /** Best-effort per-character key events; characters without a keymap
-     *  entry are skipped (the a11y set-text path carries real text anyway). */
+    private static KeyEvent key(long time, int action, int code) {
+        // Same shape `input keyevent` sends: virtual keyboard, keyboard source.
+        return new KeyEvent(time, time, action, code, 0, 0,
+                KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD);
+    }
+
+    /** Key events for [text]; all-or-nothing — a character without a key
+     *  mapping (CJK, emoji…) fails the op so the client can fall back to
+     *  accessibility set-text instead of typing half a string. */
     private static void injectText(String text) {
         KeyCharacterMap kcm = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD);
-        for (char c : text.toCharArray()) {
-            KeyEvent[] events = kcm.getEvents(new char[]{c});
-            if (events == null) continue;
-            for (KeyEvent e : events) inject(e);
+        KeyEvent[] events = kcm.getEvents(text.toCharArray());
+        if (events == null) throw new IllegalStateException("text not typeable as key events");
+        for (KeyEvent e : events) {
+            e.setSource(InputDevice.SOURCE_KEYBOARD);
+            inject(e);
         }
     }
 
     private static void touchEvent(long downTime, int action, float[] xs, float[] ys, int[] ids) {
-        touchEvent(downTime, action, xs, ys, ids, xs.length);
-    }
-
-    private static void touchEvent(long downTime, int action, float[] xs, float[] ys,
-                                   int[] ids, int pointerCount) {
+        int pointerCount = xs.length;
         long now = SystemClock.uptimeMillis();
         MotionEvent.PointerProperties[] props = new MotionEvent.PointerProperties[pointerCount];
         MotionEvent.PointerCoords[] coords = new MotionEvent.PointerCoords[pointerCount];
@@ -566,7 +734,11 @@ public final class Main {
                 downTime, Math.max(now, downTime), action, pointerCount,
                 props, coords, 0, 0, 1f, 1f, 0, 0,
                 InputDevice.SOURCE_TOUCHSCREEN, 0);
-        inject(ev);
+        try {
+            inject(ev);
+        } finally {
+            ev.recycle();
+        }
     }
 
     private static Method setDisplayIdM;
@@ -580,10 +752,10 @@ public final class Main {
                 setDisplayIdM.setAccessible(true);
             }
             setDisplayIdM.invoke(ev, displayId);
-        } catch (Throwable ignored) {
-            // Older API: events without a display id land on the default
-            // display — caller sees ok but the physical screen moves; the
-            // manager only targets devices where the call exists.
+        } catch (Throwable t) {
+            // Without a display id the event would land on the user's
+            // physical screen — refuse instead.
+            throw new IllegalStateException("cannot target display: " + t);
         }
         try {
             if (injectM == null) {
@@ -626,13 +798,18 @@ public final class Main {
 
     private static Object call(Object target, String name, Class<?>[] types, Object... args)
             throws Exception {
-        Method m = target.getClass().getDeclaredMethod(name, types);
+        Method m = target.getClass().getMethod(name, types);
         m.setAccessible(true);
         return m.invoke(target, args);
     }
 
     private static void sleep(long ms) {
+        if (ms <= 0) return;
         try { Thread.sleep(ms); } catch (InterruptedException ignored) {}
+    }
+
+    private static void sleepUntil(long uptimeMs) {
+        sleep(uptimeMs - SystemClock.uptimeMillis());
     }
 
     private static void log(String s) {
